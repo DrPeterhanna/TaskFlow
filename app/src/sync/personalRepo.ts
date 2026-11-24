@@ -1,7 +1,7 @@
-import { uuidv7 } from './ids.js';
-import { Outbox } from './outbox.js';
-import type { Clock, SqlDriver } from './types.js';
-import { systemClock } from './types.js';
+import { uuidv7 } from './ids';
+import { Outbox } from './outbox';
+import type { Clock, SqlDriver } from './types';
+import { systemClock } from './types';
 
 export interface PersonalTask {
   id: string; title: string; status: string; parent_id: string | null; planned_date: string | null; pending: boolean;
@@ -31,6 +31,14 @@ export class PersonalTaskRepo {
       if (!row) throw new Error('task not found locally');
       this.patch(id, { status: 'done' });
       this.outbox.enqueue({ rpc: 'complete_personal_task', entityType: 'personal_tasks', entityId: id, args: [id] });
+    });
+  }
+
+  reopen(id: string): void {
+    this.db.transaction(() => {
+      if (!this.get(id)) throw new Error('task not found locally');
+      this.patch(id, { status: 'todo' });
+      this.outbox.enqueue({ rpc: 'reopen_personal_task', entityType: 'personal_tasks', entityId: id, args: [id] });
     });
   }
 

@@ -1,6 +1,6 @@
-import { uuidv7 } from './ids.js';
-import type { Clock, OutboxOp, SqlDriver } from './types.js';
-import { systemClock } from './types.js';
+import { uuidv7 } from './ids';
+import type { Clock, OutboxOp, SqlDriver } from './types';
+import { systemClock } from './types';
 
 export interface EnqueueInput {
   rpc: string;

@@ -22,9 +22,20 @@ class H(BaseHTTPRequestHandler):
     def log_message(self, *a: object) -> None:  # silence
         pass
 
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        self.send_response(204)
+        self._cors()
+        self.end_headers()
+
+    def _cors(self) -> None:   # test-only: the browser preview runs on another local port
+        self.send_header("access-control-allow-origin", "*")
+        self.send_header("access-control-allow-headers", "content-type")
+        self.send_header("access-control-allow-methods", "POST, OPTIONS")
+
     def _send(self, code: int, body: object) -> None:
         raw = json.dumps(body).encode()
         self.send_response(code)
+        self._cors()
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(raw)))
         self.end_headers()
@@ -69,7 +80,7 @@ class H(BaseHTTPRequestHandler):
 def main() -> None:
     cluster = harness.Cluster(harness.ROOT / "supabase/migrations")
     H.env = cluster.fresh()
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    srv = ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1]) if len(sys.argv) > 1 else 0), H)
     print(f"READY {srv.server_address[1]}", flush=True)
     try:
         srv.serve_forever()

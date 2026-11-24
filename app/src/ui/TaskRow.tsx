@@ -1,36 +1,35 @@
 import React from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
-import { color, font, minTouch, radius, space } from '../design/tokens';
+import { Pressable, StyleSheet, View } from 'react-native';
+import { useTheme } from '../design/ThemeContext';
+import { minTouch, radius, space } from '../design/tokens';
+import type { Strings } from '../i18n';
 import type { TaskItem } from '../store/TaskStore';
+import { T } from './primitives';
 
-export function TaskRow({ task, onToggle, onRemove, doneLabel, openLabel }: {
-  task: TaskItem; onToggle: () => void; onRemove: () => void; doneLabel: string; openLabel: string;
-}) {
+export function TaskRow({ task, t, onToggle, onRemove }: { task: TaskItem; t: Strings; onToggle: () => void; onRemove: () => void }) {
+  const th = useTheme();
   return (
-    <View style={s.row}>
-      <Pressable
-        accessibilityRole="checkbox" accessibilityState={{ checked: task.done }}
-        accessibilityLabel={`${task.title}, ${task.done ? doneLabel : openLabel}`}
-        onPress={onToggle} style={s.hit}>
-        <View style={[s.box, task.done && s.boxDone]}>{task.done ? <Text style={s.tick}>✓</Text> : null}</View>
+    <View style={[s.row, { backgroundColor: th.surface, borderColor: th.border }]} testID={`task-${task.id}`}>
+      <Pressable accessibilityRole="checkbox" aria-checked={task.done} accessibilityState={{ checked: task.done }} accessibilityLabel={t.taskState(task.title, task.done)}
+        onPress={onToggle} style={s.hit} testID="toggle">
+        <View style={[s.box, { borderColor: task.done ? th.success : th.borderStrong }, task.done && { backgroundColor: th.success }]}>
+          {task.done ? <T variant="caption" weight={700} color={th.surface}>✓</T> : null}
+        </View>
       </Pressable>
-      <Text style={[s.title, task.done && s.titleDone]} numberOfLines={2}>{task.title}</Text>
-      {task.pending ? <View accessibilityLabel="waiting to sync" style={s.dot} /> : null}
-      <Pressable accessibilityRole="button" accessibilityLabel={`Delete ${task.title}`} onPress={onRemove} style={s.hit}>
-        <Text style={s.x}>×</Text>
+      {/* User-entered text keeps its own language and direction (dir=auto), independent of the UI language. */}
+      <T style={[s.title, task.done && { color: th.textMuted, textDecorationLine: 'line-through' }]} numberOfLines={2} {...({ dir: 'auto' } as object)}>{task.title}</T>
+      {task.pending ? <View accessibilityLabel={t.pendingDot} style={[s.dot, { backgroundColor: th.warning }]} testID="pending-dot" /> : null}
+      <Pressable accessibilityRole="button" accessibilityLabel={t.del(task.title)} onPress={onRemove} style={s.hit} testID="delete">
+        <T variant="title" color={th.textMuted}>×</T>
       </Pressable>
     </View>
   );
 }
 
 const s = StyleSheet.create({
-  row: { flexDirection: 'row', alignItems: 'center', backgroundColor: color.surface, borderRadius: radius.md, borderWidth: 1, borderColor: color.border, paddingHorizontal: space.sm, marginBottom: space.sm, minHeight: minTouch + 8 },
+  row: { flexDirection: 'row', alignItems: 'center', borderRadius: radius.card, borderWidth: 1, paddingHorizontal: space.sm, marginBottom: space.sm, minHeight: minTouch + space.sm },
   hit: { minWidth: minTouch, minHeight: minTouch, alignItems: 'center', justifyContent: 'center' },
-  box: { width: 24, height: 24, borderRadius: 7, borderWidth: 2, borderColor: color.textMuted, alignItems: 'center', justifyContent: 'center' },
-  boxDone: { backgroundColor: color.success, borderColor: color.success },
-  tick: { color: color.onPrimary, fontSize: 15, fontWeight: '700' },
-  title: { flex: 1, fontSize: font.body, color: color.text, paddingHorizontal: space.xs },
-  titleDone: { color: color.textMuted, textDecorationLine: 'line-through' },
-  dot: { width: 10, height: 10, borderRadius: 5, backgroundColor: color.warning, marginHorizontal: space.sm },
-  x: { fontSize: 26, color: color.textMuted },
+  box: { width: 24, height: 24, borderRadius: 7, borderWidth: 2, alignItems: 'center', justifyContent: 'center' },
+  title: { flex: 1, paddingHorizontal: space.xs },
+  dot: { width: 10, height: 10, borderRadius: 5, marginHorizontal: space.sm },
 });

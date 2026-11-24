@@ -1,6 +1,6 @@
-import { backoffMs, Outbox } from './outbox.js';
-import type { Clock, RpcClient, SqlDriver } from './types.js';
-import { systemClock, TransportError } from './types.js';
+import { backoffMs, Outbox } from './outbox';
+import type { Clock, RpcClient, SqlDriver } from './types';
+import { systemClock, TransportError } from './types';
 
 export type SyncStatus = 'idle' | 'waiting' | 'paused_unauthorized';
 

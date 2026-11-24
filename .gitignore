@@ -4,3 +4,5 @@ __pycache__/
 .ruff_cache/
 dist/
 .expo/
+.env.local
+.env*.local

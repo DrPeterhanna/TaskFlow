@@ -6,7 +6,7 @@ import type { RpcClient, SqlDriver } from '../sync/types';
 import type { StoreState, TaskStore } from './TaskStore';
 
 /** Real store: UI reads only local SQLite; writes are optimistic + outbox; a sync loop pushes and pulls. */
-export function createSqliteStore(db: SqlDriver, rpc: RpcClient, opts: { autoSync?: boolean } = {}): TaskStore & { sync(): Promise<void>; engine: SyncEngine } {
+export function createSqliteStore(db: SqlDriver, rpc: RpcClient, opts: { autoSync?: boolean } = {}): TaskStore & { sync(): Promise<void>; connectivityRestored(): Promise<void>; engine: SyncEngine } {
   migrate(db);
   const outbox = new Outbox(db);
   outbox.recoverInflight();
@@ -33,19 +33,29 @@ export function createSqliteStore(db: SqlDriver, rpc: RpcClient, opts: { autoSyn
         if (online) await engine.pull('personal_tasks');
       } catch {
         online = false;
-      } finally { syncing = null; emit(); }
+      } finally { syncing = null; emit(); scheduleRetry(); }
     })();
     return syncing;
   };
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  /** Never gives up: wake up when the earliest queued op is due again. */
+  function scheduleRetry(): void {
+    if (timer || opts.autoSync === false) return;
+    const next = db.all<{ t: number | null }>("select min(next_attempt_at) as t from outbox where state = 'queued'")[0]?.t;
+    if (next === null || next === undefined) return;
+    timer = setTimeout(() => { timer = null; void sync(); }, Math.max(500, Number(next) - Date.now()));
+  }
   const kick = () => { emit(); if (opts.autoSync !== false) void sync(); };
   return {
     engine, sync,
+    /** Network came back: clear backoff and push now (like the OS connectivity event on a device). */
+    connectivityRestored() { db.run("update outbox set next_attempt_at = 0 where state = 'queued'"); return sync(); },
     getState: () => state,
     subscribe: (f) => { subs.add(f); return () => { subs.delete(f); }; },
     add(title) { repo.create(title); kick(); },
     toggle(id) {
       const t = repo.get(id);
-      if (t && t.status !== 'done') repo.complete(id);   // reopen is a separate op; UI wiring comes with the Phase 4 task screens
+      if (t) { if (t.status === 'done') repo.reopen(id); else repo.complete(id); }
       kick();
     },
     remove(id) { repo.remove(id); kick(); },

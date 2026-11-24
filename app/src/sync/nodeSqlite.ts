@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import type { SqlDriver, SqlValue } from './types.js';
+import type { SqlDriver, SqlValue } from './types';
 
 /** Driver for tests and tooling. The Expo app supplies an expo-sqlite adapter with the same interface. */
 export function openNodeSqlite(path = ':memory:'): SqlDriver {

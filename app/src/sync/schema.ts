@@ -1,4 +1,4 @@
-import type { SqlDriver } from './types.js';
+import type { SqlDriver } from './types';
 
 const MIGRATIONS: string[] = [
   `create table outbox (

@@ -1,59 +1,64 @@
 import React, { useState, useSyncExternalStore } from 'react';
-import { FlatList, I18nManager, Pressable, SafeAreaView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
-import { color, font, minTouch, radius, space } from '../design/tokens';
+import { FlatList, SafeAreaView, StyleSheet, Switch, TextInput, View } from 'react-native';
+import { useTheme } from '../design/ThemeContext';
+import { fontFamily, minTouch, radius, space, type } from '../design/tokens';
 import { isRtl, strings, type Locale } from '../i18n';
 import type { TaskStore } from '../store/TaskStore';
+import { Button, T } from './primitives';
 import { TaskRow } from './TaskRow';
 
-export function PersonalTasksScreen({ store, locale, preview }: { store: TaskStore; locale: Locale; preview?: boolean }) {
+export function PersonalTasksScreen({ store, locale, previewNote, simulateOffline }: {
+  store: TaskStore; locale: Locale; previewNote?: boolean; simulateOffline?: { value: boolean; set: (v: boolean) => void };
+}) {
+  const th = useTheme();
   const st = useSyncExternalStore(store.subscribe, store.getState);
   const t = strings(locale);
   const [draft, setDraft] = useState('');
-  const rtl = isRtl(locale);
   const submit = () => { if (draft.trim()) { store.add(draft); setDraft(''); } };
-  const status = !st.online ? { text: t.offline, bg: color.warningBg, fg: color.warning }
-    : st.waiting > 0 ? { text: t.waiting(st.waiting), bg: color.warningBg, fg: color.warning }
-    : { text: t.synced, bg: color.okBg, fg: color.success };
-  void I18nManager;
+  const status = !st.online ? { text: t.offline, bg: th.warningBg, fg: th.warning }
+    : st.waiting > 0 ? { text: t.waiting(st.waiting), bg: th.warningBg, fg: th.warning }
+    : { text: t.synced, bg: th.successBg, fg: th.success };
   return (
-    <SafeAreaView style={[s.screen, { direction: rtl ? 'rtl' : 'ltr' }]}>
+    <SafeAreaView style={[s.screen, { backgroundColor: th.bg, direction: isRtl(locale) ? 'rtl' : 'ltr' }]}>
       <View style={s.header}>
-        <Text accessibilityRole="header" style={s.h1}>{t.title}</Text>
-        <View style={[s.chip, { backgroundColor: status.bg }]} accessibilityLiveRegion="polite">
-          <Text style={[s.chipText, { color: status.fg }]}>{status.text}</Text>
+        <T variant="display" weight={700} accessibilityRole="header">{t.title}</T>
+        <View style={[s.chip, { backgroundColor: status.bg }]} accessibilityLiveRegion="polite" testID="sync-chip">
+          <T variant="caption" weight={600} color={status.fg}>{status.text}</T>
         </View>
-        {st.needAttention > 0 ? <Pressable accessibilityRole="button" style={[s.chip, { backgroundColor: color.dangerBg }]}><Text style={[s.chipText, { color: color.danger }]}>{t.inbox(st.needAttention)}</Text></Pressable> : null}
+        {st.needAttention > 0 ? (
+          <View style={[s.chip, { backgroundColor: th.dangerBg }]} testID="attention-chip"><T variant="caption" weight={600} color={th.danger}>{t.inbox(st.needAttention)}</T></View>
+        ) : null}
       </View>
       <View style={s.addRow}>
-        <TextInput value={draft} onChangeText={setDraft} onSubmitEditing={submit} placeholder={t.placeholder} placeholderTextColor={color.textMuted}
-          accessibilityLabel={t.placeholder} style={s.input} returnKeyType="done" maxLength={300} />
-        <Pressable accessibilityRole="button" onPress={submit} style={s.addBtn}><Text style={s.addText}>{t.add}</Text></Pressable>
+        <TextInput value={draft} onChangeText={setDraft} onSubmitEditing={submit} placeholder={t.placeholder} placeholderTextColor={th.textMuted}
+          accessibilityLabel={t.placeholder} returnKeyType="done" maxLength={300} testID="new-task"
+          {...({ dir: 'auto' } as object)}
+          style={[s.input, { backgroundColor: th.surface, borderColor: th.borderStrong, color: th.text, fontFamily: fontFamily[400], fontSize: type.body.size }]} />
+        <Button label={t.add} onPress={submit} />
       </View>
-      <FlatList
-        data={st.tasks} keyExtractor={(x) => x.id} contentContainerStyle={{ padding: space.lg }}
-        ListEmptyComponent={<Text style={s.empty}>{t.empty}</Text>}
-        renderItem={({ item }) => <TaskRow task={item} doneLabel={t.done} openLabel={t.open} onToggle={() => store.toggle(item.id)} onRemove={() => store.remove(item.id)} />} />
-      {preview && store.setOnline ? (
-        <View style={s.footer}>
-          <Text style={s.note}>{t.preview}</Text>
-          <View style={s.toggle}><Text style={s.note}>{t.offlineToggle}</Text><Switch value={!st.online} onValueChange={(v) => store.setOnline?.(!v)} /></View>
+      <FlatList data={st.tasks} keyExtractor={(x) => x.id} contentContainerStyle={{ paddingHorizontal: space.lg, paddingBottom: space.xxl }}
+        ListEmptyComponent={<View style={s.empty}><T variant="heading" weight={600}>{t.empty}</T><T color={th.textMuted} style={{ textAlign: 'center' }}>{t.emptyHint}</T></View>}
+        renderItem={({ item }) => <TaskRow task={item} t={t} onToggle={() => store.toggle(item.id)} onRemove={() => store.remove(item.id)} />} />
+      {previewNote ? (
+        <View style={[s.footer, { backgroundColor: th.surface, borderColor: th.border }]}>
+          <T variant="caption" color={th.textMuted}>{t.previewNote}</T>
+          {simulateOffline ? (
+            <View style={s.toggle}>
+              <T variant="caption" color={th.textMuted}>{t.simulateOffline}</T>
+              <Switch value={simulateOffline.value} onValueChange={simulateOffline.set} accessibilityLabel={t.simulateOffline} testID="offline-switch" />
+            </View>) : null}
         </View>) : null}
     </SafeAreaView>
   );
 }
 
 const s = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: color.bg },
+  screen: { flex: 1 },
   header: { paddingHorizontal: space.lg, paddingTop: space.xl, gap: space.sm, alignItems: 'flex-start' },
-  h1: { fontSize: font.title, fontWeight: '700', color: color.text },
-  chip: { borderRadius: radius.pill, paddingHorizontal: space.md, paddingVertical: 6 },
-  chipText: { fontSize: font.small, fontWeight: '600' },
+  chip: { borderRadius: radius.pill, paddingHorizontal: space.md, paddingVertical: space.xs },
   addRow: { flexDirection: 'row', gap: space.sm, padding: space.lg },
-  input: { flex: 1, minHeight: minTouch, backgroundColor: color.surface, borderRadius: radius.md, borderWidth: 1, borderColor: color.border, paddingHorizontal: space.md, fontSize: font.body, color: color.text },
-  addBtn: { minHeight: minTouch, minWidth: 72, borderRadius: radius.md, backgroundColor: color.primary, alignItems: 'center', justifyContent: 'center', paddingHorizontal: space.lg },
-  addText: { color: color.onPrimary, fontSize: font.body, fontWeight: '600' },
-  empty: { color: color.textMuted, fontSize: font.body, textAlign: 'center', marginTop: space.xl },
-  footer: { padding: space.lg, borderTopWidth: 1, borderColor: color.border, backgroundColor: color.surface, gap: space.sm },
+  input: { flex: 1, minHeight: minTouch, borderRadius: radius.control, borderWidth: 1, paddingHorizontal: space.md },
+  empty: { alignItems: 'center', gap: space.sm, marginTop: space.xxl, paddingHorizontal: space.xl },
+  footer: { padding: space.lg, borderTopWidth: 1, gap: space.sm },
   toggle: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  note: { color: color.textMuted, fontSize: font.small },
 });
