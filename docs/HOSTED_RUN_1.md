@@ -14,3 +14,8 @@ authenticator role: pgrst.db_schemas = 'public, graphql_public, app_api' (only a
 - REST: rpc call to app_api with the publishable key and no user JWT -> 401 "permission denied for schema app_api" (anon denied). Schema app -> PGRST106 not exposed.
 ## NOT done
 Real authenticated JWT tests (RLS per role, RPC flows, sync_pull) need a confirmed test user; email confirmation is required and no supported admin credential held. Hosted run of the 46-test suite not done. Device runs not done.
+
+## Follow-up checks (local, not Supabase)
+- 46 of 46 local Postgres tests pass after the 0001 amendment (superuser, clean DB).
+- tests/upgrade_nonsuper.py: all 13 migrations apply as a NON-superuser CREATEROLE user (hosted-like) on local PG 16: 13 of 13 applied.
+- Dashboard browser route: saved browser profile not signed in to Supabase; no dashboard credential held.
