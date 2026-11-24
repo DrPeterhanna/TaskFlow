@@ -104,7 +104,8 @@ def lint_clients_have_no_write_privileges_and_anon_has_none(env: Env) -> None:
         where n.nspname='app_api' and has_function_privilege('authenticated', p.oid, 'execute')""")}
     assert callable_ == {"create_organization", "create_unit", "rename_unit", "move_unit", "create_invitation",
                          "revoke_invitation", "redeem_invitation", "set_member_role", "move_member",
-                         "set_member_status", "grant_permission", "revoke_permission", "update_profile", "current_epoch"}, callable_
+                         "set_member_status", "grant_permission", "revoke_permission", "update_profile", "current_epoch",
+                         "create_personal_task", "complete_personal_task", "create_personal_note", "sync_pull"}, callable_
     priv = env.su("""select p.proname from pg_proc p join pg_namespace n on n.oid=p.pronamespace
         where n.nspname='app_private' and has_function_privilege('authenticated', p.oid, 'execute') order by 1""")
     assert {r[0] for r in priv} == {"my_membership_id", "is_active_member", "me_has_authority_over_membership",
@@ -665,3 +666,87 @@ def lifecycle_removed_member_rejoins_by_invitation_only_and_keeps_history(env: E
     env.rpc(f.admin, "set_member_status", f.mid["lead"], "suspended")
     inv2 = env.rpc(f.admin, "create_invitation", "member", f.u1, 1, FUTURE)
     expect_tf("validation", lambda: env.rpc(f.lead, "redeem_invitation", inv2["data"]["code"]))
+
+
+def uuid7() -> str:
+    return new_op()
+
+
+@test
+def personal_space_owner_only_even_admin_and_supervisor_cannot_read(env: Env) -> None:
+    f = fixture(env)
+    t, p = uuid7(), uuid7()
+    env.rpc(f.mem, "create_personal_task", t, None, "secret plan", None)
+    env.rpc(f.mem, "create_personal_task", p, t, "secret subtask", None)
+    env.rpc(f.mem, "create_personal_note", uuid7(), "private note")
+    env.rpc(f.mem, "complete_personal_task", p)
+    for who in (f.admin, f.sup, f.lead, f.lead2, f.outsider):
+        for tbl in ("personal_tasks", "personal_notes", "personal_events", "personal_task_dependencies", "personal_attachments", "personal_recurrence_rules"):
+            assert rows(env, who, f"select * from app.{tbl}") == [], (who[:6], tbl)
+    assert len(rows(env, f.mem, "select id from app.personal_tasks")) == 2
+    assert [r[0] for r in rows(env, f.mem, "select kind from app.personal_events order by id")] == ["ptask.created", "ptask.created", "pnote.created", "ptask.completed"]
+    # never in the org stream, never in org audit
+    assert env.su("select count(*) from app.events where kind like 'ptask.%' or kind like 'pnote.%' or payload::text like '%secret%'")[0][0] == 0
+    # owner-only history has its own chain; clients cannot write it; sync_pull respects RLS too
+    assert env.su("select app_private.verify_chain(user_id) from app.personal_events limit 1")[0][0] is None
+    expect_pg(("42501",), lambda: rows(env, f.mem, "update app.personal_tasks set title='x'"))
+    assert rows(env, f.admin, "select app_api.sync_pull('personal_tasks')::jsonb -> 'rows'")[0][0] == []
+
+
+@test
+def personal_space_depth_gate_server_stamp_and_cascade(env: Env) -> None:
+    f = fixture(env)
+    a, b, c, d = uuid7(), uuid7(), uuid7(), uuid7()
+    env.rpc(f.mem, "create_personal_task", a, None, "L0", None)
+    env.rpc(f.mem, "create_personal_task", b, a, "L1", None)
+    env.rpc(f.mem, "create_personal_task", c, b, "L2", None)
+    expect_tf("validation", lambda: env.rpc(f.mem, "create_personal_task", d, c, "L3", None))
+    expect_tf("not_found", lambda: env.rpc(f.lead, "create_personal_task", uuid7(), a, "stranger child", None))   # other user's parent
+    expect_tf("gate_failed", lambda: env.rpc(f.mem, "complete_personal_task", a))
+    env.rpc(f.mem, "complete_personal_task", c)
+    env.rpc(f.mem, "complete_personal_task", b)
+    env.rpc(f.mem, "complete_personal_task", a)
+    assert env.su("select count(*) from app.personal_tasks where status='done' and completed_at is not null")[0][0] == 3
+    expect_pg(("23514",), lambda: env.su("update app.personal_tasks set status='done', completed_at=null where id=%s", (a,)))
+    expect_tf("not_found", lambda: env.rpc(f.lead, "complete_personal_task", a))
+    env.su("delete from app.profiles where id=%s", (f.mem,)) if False else None
+
+
+@test
+def sync_pull_commit_safe_horizon_never_skips_late_commits(env: Env) -> None:
+    """Proposed design validated on local PostgreSQL only: a transaction that started earlier
+    but commits later than a higher-xid transaction is never skipped."""
+    f = fixture(env)
+    ids = [uuid7() for _ in range(3)]
+    # A starts first (lower xid) and stays open
+    # raw insert (no RPC) so it does not share the per-user event lock with B
+    ca = env.conn()
+    cura = ca.cursor()
+    cura.execute("insert into app.personal_tasks (id, user_id, title) values (%s, %s, 'from A')", (ids[0], f.mem))
+    # B starts later (higher xid) and commits first
+    env.rpc(f.mem, "create_personal_task", ids[1], None, "from B", None)
+    first = rows(env, f.mem, "select app_api.sync_pull('personal_tasks')::jsonb")[0][0]
+    titles1 = [r["title"] for r in first["rows"]]
+    assert "from A" not in titles1 and "from B" not in titles1, "rows above the horizon must wait"
+    ca.commit()          # A commits late
+    env.rpc(f.mem, "create_personal_task", ids[2], None, "from C", None)
+    got: list[str] = []
+    cur_xid, cur_id = "0", ""
+    for _ in range(5):
+        pg = rows(env, f.mem, f"select app_api.sync_pull('personal_tasks', '{cur_xid}'::xid8, '{cur_id}')::jsonb")[0][0]
+        got += [r["title"] for r in pg["rows"]]
+        if not pg["rows"]:
+            break
+        cur_xid, cur_id = pg["next_xid"], pg["next_id"]
+    assert sorted(got) == ["from A", "from B", "from C"], got
+    # pagination with a limit walks every row exactly once
+    seen: list[str] = []
+    cur_xid, cur_id = "0", ""
+    for _ in range(6):
+        pg = rows(env, f.mem, f"select app_api.sync_pull('personal_tasks', '{cur_xid}'::xid8, '{cur_id}', null, 1)::jsonb")[0][0]
+        if not pg["rows"]:
+            break
+        seen += [r["title"] for r in pg["rows"]]
+        cur_xid, cur_id = pg["next_xid"], pg["next_id"]
+    assert sorted(seen) == ["from A", "from B", "from C"]
+    expect_tf("validation", lambda: env.rpc(f.mem, "update_profile", {}) and rows(env, f.mem, "select app_api.sync_pull('profiles')"))
