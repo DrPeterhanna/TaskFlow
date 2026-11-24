@@ -76,3 +76,97 @@ def update_checked_refuses_unseen_changes_and_never_overwrites(env: Env) -> None
     other = env.user("chk2@a.test", name="Chk2")
     expect_tf("not_found", lambda: env.rpc(other, "update_personal_task_checked", t, {"title": "Z"}, {"title": "Y"}))
     expect_tf("validation", lambda: env.rpc(u, "update_personal_task_checked", t, {"completed_at": "2026-01-01"}, {}))
+
+
+# ---------------------------------------------------------------- 0020 conditional complete / reopen / delete
+def _task(env: Env, u: str, title: str = "T", parent: str | None = None) -> str:
+    import uuid
+    t = str(uuid.uuid4())
+    env.rpc(u, "create_personal_task", t, parent, title, None)
+    return t
+
+
+def _row(env: Env, t: str):
+    return env.su("select status, row_version, deleted_at is not null, title from app.personal_tasks where id = %s", (t,))[0]
+
+
+def _events(env: Env, t: str) -> int:
+    return env.su("select count(*) from app.personal_events where subject_id = %s", (t,))[0][0]
+
+
+@test
+def checked_complete_refuses_when_status_changed_elsewhere_and_the_refusal_is_terminal(env: Env) -> None:
+    """Needs 0020. Device saw 'todo'; another device cancelled the task. Completing must not silently overwrite that."""
+    from harness import new_op
+    u = env.user("c1@a.test", name="C1")
+    t = _task(env, u)
+    env.rpc(u, "update_personal_task_checked", t, {"status": "canceled"}, {"status": "todo"})
+    before, ev = _row(env, t), _events(env, t)
+    op = new_op()
+    r = env.rpc(u, "complete_personal_task_checked", t, {"status": "todo"}, op=op)
+    assert r["ok"] is False and r["code"] == "stale_conflict" and r["current"]["status"] == "canceled"
+    assert _row(env, t) == before and _events(env, t) == ev               # nothing changed, nothing emitted
+    env.rpc(u, "update_personal_task_checked", t, {"status": "todo"}, {"status": "canceled"})   # values change BACK to what the device saw
+    assert env.rpc(u, "complete_personal_task_checked", t, {"status": "todo"}, op=op)["code"] == "stale_conflict"   # same op: terminal
+    assert _row(env, t)[0] == "todo"
+    fresh = env.rpc(u, "complete_personal_task_checked", t, {"status": "todo"})                # explicit fresh op with a fresh base
+    assert fresh["ok"] is True and _row(env, t)[0] == "done"
+
+
+@test
+def checked_complete_and_reopen_are_idempotent_when_the_goal_is_already_reached(env: Env) -> None:
+    u = env.user("c2@a.test", name="C2")
+    t = _task(env, u)
+    assert env.rpc(u, "complete_personal_task_checked", t, {"status": "todo"})["ok"]
+    ev = _events(env, t)
+    r = env.rpc(u, "complete_personal_task_checked", t, {"status": "todo"})                     # second device, stale base, same goal
+    assert r["ok"] is True and r["data"]["already"] is True and _events(env, t) == ev
+    assert env.rpc(u, "reopen_personal_task_checked", t, {"status": "done"})["ok"]
+    ev = _events(env, t)
+    r = env.rpc(u, "reopen_personal_task_checked", t, {"status": "done"})
+    assert r["data"]["already"] is True and _events(env, t) == ev and _row(env, t)[0] == "todo"
+    # reopen refused when the task moved on to another state the device never saw
+    env.rpc(u, "complete_personal_task_checked", t, {"status": "todo"})
+    env.rpc(u, "reopen_personal_task_checked", t, {"status": "done"})
+    env.rpc(u, "update_personal_task_checked", t, {"status": "in_progress"}, {"status": "todo"})
+    r = env.rpc(u, "reopen_personal_task_checked", t, {"status": "done"})
+    assert r["ok"] is False and r["code"] == "stale_conflict" and _row(env, t)[0] == "in_progress"
+
+
+@test
+def checked_delete_refuses_a_remote_edit_and_a_remote_subtask_edit_unseen_by_the_device(env: Env) -> None:
+    from harness import new_op
+    u = env.user("c3@a.test", name="C3")
+    t = _task(env, u, "parent")
+    child = _task(env, u, "child", t)
+    st, ver, _, _ = _row(env, t)
+    sub = env.su("select count(*), coalesce(sum(row_version),0) from app.personal_tasks where parent_id = %s and deleted_at is null", (t,))[0]
+    base = {"row_version": ver, "subtree": {"n": sub[0], "sum": int(sub[1])}}
+    env.rpc(u, "update_personal_task_checked", child, {"title": "edited elsewhere"}, {"title": "child"})   # remote edit of a subtask
+    op = new_op()
+    r = env.rpc(u, "delete_personal_task_checked", t, base, op=op)
+    assert r["ok"] is False and r["code"] == "stale_conflict"
+    assert _row(env, t)[2] is False and _row(env, child)[2] is False and _row(env, child)[3] == "edited elsewhere"
+    assert env.rpc(u, "delete_personal_task_checked", t, base, op=op)["code"] == "stale_conflict"          # terminal on resend
+    # the parent itself edited elsewhere
+    env.rpc(u, "update_personal_task_checked", t, {"notes": "n"}, {"notes": None})
+    _, ver2, _, _ = _row(env, t)
+    sub2 = env.su("select count(*), coalesce(sum(row_version),0) from app.personal_tasks where parent_id = %s and deleted_at is null", (t,))[0]
+    assert env.rpc(u, "delete_personal_task_checked", t, {"row_version": ver}, op=new_op())["code"] == "stale_conflict"
+    fresh = env.rpc(u, "delete_personal_task_checked", t, {"row_version": ver2, "subtree": {"n": sub2[0], "sum": int(sub2[1])}})
+    assert fresh["ok"] is True and fresh["data"]["rows"] == 2 and _row(env, t)[2] and _row(env, child)[2]
+    again = env.rpc(u, "delete_personal_task_checked", t, base)                                              # already deleted: idempotent
+    assert again["ok"] is True and again["data"]["already"] is True
+
+
+@test
+def checked_mutations_require_a_base_refuse_other_users_and_deleted_tasks(env: Env) -> None:
+    u, w = env.user("c4@a.test", name="C4"), env.user("c5@a.test", name="C5")
+    t = _task(env, u)
+    for fn, base in (("complete_personal_task_checked", {}), ("reopen_personal_task_checked", {}), ("delete_personal_task_checked", {})):
+        expect_tf("validation", lambda fn=fn, base=base: env.rpc(u, fn, t, base))
+    for fn, base in (("complete_personal_task_checked", {"status": "todo"}), ("delete_personal_task_checked", {"row_version": 1})):
+        expect_tf("not_found", lambda fn=fn, base=base: env.rpc(w, fn, t, base))                    # not the owner
+    assert env.rpc(u, "delete_personal_task_checked", t, {"row_version": _row(env, t)[1]})["ok"]
+    expect_tf("not_found", lambda: env.rpc(u, "complete_personal_task_checked", t, {"status": "todo"}))   # tombstone
+    assert _row(env, t)[2] is True

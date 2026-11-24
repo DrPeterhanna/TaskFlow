@@ -34,7 +34,7 @@ def audit_no_function_is_executable_by_anon_or_public(env: Env) -> None:
 def audit_authenticated_can_execute_only_the_api_and_the_rls_helper_set(env: Env) -> None:
     rows = env.su(_FN, (list(SCHEMAS),))
     api = {r[1] for r in rows if r[0] == 'app_api' and r[5]}
-    assert len(api) >= 30, len(api)                                   # 38 on all migrations; fewer on the baseline
+    assert len(api) >= 30, len(api)                                   # 41 on all migrations; fewer on the baseline
     helpers = {r[1] for r in rows if r[0] == 'app_private' and r[5]}
     # only the pure read-only helpers that RLS policies call; every writer (begin_op, finish_op, emit_*, remove_membership...) is closed
     assert helpers <= {'is_active_member', 'me_can_see_profile', 'me_has_authority_over_membership', 'me_in_org_of_unit',

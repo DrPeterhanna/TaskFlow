@@ -107,7 +107,7 @@ def lint_clients_have_no_write_privileges_and_anon_has_none(env: Env) -> None:
                          "set_member_status", "grant_permission", "revoke_permission", "update_profile", "current_epoch",
                          "create_personal_task", "complete_personal_task", "create_personal_note", "sync_pull",
                          "rotate_invitation_code",
-                         "update_personal_task", "update_personal_task_checked", "reopen_personal_task", "delete_personal_task", "restore_personal_task",
+                         "update_personal_task", "update_personal_task_checked", "complete_personal_task_checked", "reopen_personal_task_checked", "delete_personal_task_checked", "reopen_personal_task", "delete_personal_task", "restore_personal_task",
                          "reorder_personal_task", "add_personal_dependency", "remove_personal_dependency",
                          "set_personal_recurrence", "clear_personal_recurrence", "update_personal_note",
                          "delete_personal_note", "leave_organization", "close_organization", "my_membership",
