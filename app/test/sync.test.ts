@@ -118,7 +118,8 @@ describe('push retries and idempotency', () => {
     repo.create('B');
     server.failNext.push({ ok: false, code: 'forbidden', message: 'nope' });
     const rep = await engine.push();
-    expect(rep.rejected).toBe(2);
+    expect(rep.rejected).toBe(1);   // the dependent is rejected by cascade without being sent
+    expect(outbox.counts().rejected).toBe(2);
     expect(rep.acked).toBe(1);
     expect(outbox.rejected().map((o) => o.error_code)).toEqual(['forbidden', 'dependency_rejected']);
   });
