@@ -18,7 +18,7 @@ M = [
     ("0003_organizations_units_closure.sql", "as $$ select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('org-structure:' || p_org::text, 0)) $$;", "as $$ select 1 $$;", "structure lock made a no-op"),
     ("0003_organizations_units_closure.sql", "alter table app.memberships", "alter table app.memberships", "noop-guard"),
     ("0004_memberships_grants_invitations.sql", "alter table app.%I force row level security", "alter table app.%I disable row level security", "RLS not forced on memberships group"),
-    ("0004_memberships_grants_invitations.sql", "perform app_private.raise_tf('validation', 'an organization must keep at least one active admin');", "null;", "last admin check removed"),
+    ("0014_account_lifecycle.sql", "perform app_private.raise_tf('validation', 'an organization must keep at least one active admin');", "null;", "last admin check removed (0014 redefinition)"),
     ("0004_memberships_grants_invitations.sql", "if old.role = 'admin' and old.status = 'active' then\n      perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('org-admins:' || old.org_id::text, 0));\n    end if;\n  end if;", "null;\n  end if;", "admin lock removed (update path)"),
     ("0005_authz_helpers.sql", "app_private.role_rank(a.role) > app_private.role_rank(t.role)", "app_private.role_rank(a.role) >= app_private.role_rank(t.role)", "rank strictness weakened"),
     ("0005_authz_helpers.sql", "or exists (select 1 from app.unit_closure c\n                      where c.ancestor_id = a.unit_id and c.descendant_id = p_unit)", "or true", "scope check removed from unit_in_scope"),
