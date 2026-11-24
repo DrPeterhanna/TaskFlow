@@ -34,6 +34,21 @@ const MIGRATIONS: string[] = [
    );
    create table meta (key text primary key, value text not null);`,
   `alter table local_rows add column base_json text;   -- last server-confirmed value while an optimistic edit is pending`,
+  // 3: recovery state. skipped_rows marks server rows we did not apply because a local op was pending (cursor is rewound
+  // to re-fetch them once settled). sync_conflicts is the user-visible record of concurrent edits.
+  `create table skipped_rows (
+     stream text not null, id text not null, xid text not null,
+     primary key (stream, id)
+   );
+   create table sync_conflicts (
+     id integer primary key autoincrement,
+     stream text not null, entity_id text not null,
+     kind text not null check (kind in ('field','deleted_remotely')),
+     field text, base_value text, local_value text, server_value text,
+     state text not null default 'open' check (state in ('open','applied','moot','resolved','dismissed')),
+     detected_at integer not null,
+     unique (stream, entity_id, kind, field, state)
+   );`,
 ];
 
 export function migrate(db: SqlDriver): number {

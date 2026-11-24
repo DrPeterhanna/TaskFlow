@@ -23,3 +23,21 @@ describe('supabase rpc adapter (mocked transport, NOT a hosted test)', () => {
     await expect(mk(400).call('complete_personal_task', ['a'], 'o')).rejects.toBeInstanceOf(TransportError);
   });
 });
+
+describe('error classification (poison-op guard)', () => {
+  const mk = (status: number, code?: string) => createRpcClientFrom(async () => ({ data: null, status, error: { message: 'boom', code } }));
+  it('a database constraint error (HTTP 400, SQLSTATE 23xxx) is a permanent rejection, not an endless retry', async () => {
+    expect(await mk(400, '23514').call('update_personal_task', ['x', {}], 'op')).toMatchObject({ ok: false, code: 'rejected_by_server' });
+  });
+  it('429, 408 and 5xx stay retryable transport errors; unknown 4xx is not silently dropped', async () => {
+    for (const [st, c] of [[429, '23514'], [408, '22000'], [503, '23514'], [400, 'XX000'], [404, undefined]] as const) {
+      await expect(mk(st, c).call('update_personal_task', ['x', {}], 'op'), `${st} ${c}`).rejects.toBeInstanceOf(TransportError);
+    }
+  });
+  it('sync_status refuses a malformed answer instead of assuming no resync is needed', async () => {
+    const c = createRpcClientFrom(async () => ({ data: { weird: true }, status: 200, error: null }));
+    await expect(c.status!('personal_tasks', '5')).rejects.toBeInstanceOf(TransportError);
+    const ok = createRpcClientFrom(async () => ({ data: { ok: true, data: { floor_xid: '9', full_resync_required: true } }, status: 200, error: null }));
+    expect(await ok.status!('personal_tasks', '5')).toEqual({ floor_xid: '9', full_resync_required: true });
+  });
+});

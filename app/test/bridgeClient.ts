@@ -7,7 +7,7 @@ export class Bridge {
   proc!: ChildProcess;
   base = '';
   async start(): Promise<void> {
-    this.proc = spawn('python3', ['../tests/bridge.py'], { stdio: ['ignore', 'pipe', 'inherit'] });
+    this.proc = spawn('python3', ['../tests/bridge.py'], { env: process.env, stdio: ['ignore', 'pipe', 'inherit'] });
     const rl = createInterface({ input: this.proc.stdout! });
     this.base = await new Promise<string>((res, rej) => {
       const t = setTimeout(() => rej(new Error('bridge start timeout')), 60_000);
@@ -19,6 +19,7 @@ export class Bridge {
   async post(path: string, body: unknown): Promise<any> {
     const r = await fetch(this.base + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     const j = await r.json();
+    if (r.status === 400 && j.sqlstate) return { ok: false, code: 'rejected_by_server', message: j.error, sqlstate: j.sqlstate };   // mirrors createRpcClientFrom
     if (!r.ok) throw new TransportError(`${r.status} ${JSON.stringify(j)}`, r.status === 401 ? 'unauthorized' : 'server');
     return j;
   }
@@ -30,6 +31,7 @@ export class Bridge {
       call: async (rpc, args, opId) => (await this.post('/rpc', { uid, fn: rpc, args, op: opId })) as RpcResult,
       pull: async (stream, afterXid, afterId, horizon, limit) =>
         (await this.post('/pull', { uid, stream, after_xid: afterXid, after_id: afterId, horizon, limit })) as PullPage,
+      status: async (stream, afterXid) => ((await this.post('/status', { uid, stream, after_xid: afterXid })) as { data: { full_resync_required: boolean; floor_xid: string } }).data,
     };
   }
 }

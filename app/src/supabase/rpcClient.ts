@@ -26,6 +26,11 @@ export function createRpcClientFrom(call: Call): RpcClient {
         try { const d = JSON.parse(r.error.details ?? '{}') as { code?: string }; if (d.code) code = d.code; } catch { /* keep SQLSTATE */ }
         return { ok: false, code, message: r.error.message };
       }
+      // A 4xx the database raised itself (constraint or data error, SQLSTATE class 22/23) is a permanent "no": retrying the same
+      // op can never succeed and would block every op queued behind it, so it is a rejection the user can see.
+      if (r.status >= 400 && r.status < 500 && r.status !== 408 && r.status !== 429 && /^(22|23)/.test(r.error.code ?? '')) {
+        return { ok: false, code: 'rejected_by_server', message: r.error.message };
+      }
       throw new TransportError(`unexpected REST error ${r.status}: ${r.error.message}`, 'server');
     }
     return r.data;
@@ -42,6 +47,11 @@ export function createRpcClientFrom(call: Call): RpcClient {
     },
     async pull(stream, afterXid, afterId, horizon, limit): Promise<PullPage> {
       return (await run('sync_pull', { p_stream: stream, p_after_xid: afterXid, p_after_id: afterId, p_horizon: horizon, p_limit: limit })) as PullPage;
+    },
+    async status(stream, afterXid) {
+      const r = (await run('sync_status', { p_stream: stream, p_after_xid: afterXid })) as { ok?: boolean; data?: { full_resync_required: boolean; floor_xid: string } };
+      if (!r || r.ok !== true || !r.data) throw new TransportError('sync_status: unexpected answer', 'server');   // never guess "no resync needed" from a bad answer
+      return r.data;
     },
   };
 }

@@ -87,6 +87,35 @@ export class Outbox {
     for (const r of this.db.all<{ state: string; n: number }>('select state, count(*) as n from outbox group by state')) out[r.state] = Number(r.n);
     return out;
   }
+  /** Recovery: re-queue a rejected op (same op_id) together with the dependents that were rejected only because of it. */
+  retryRejected(seq: number): boolean {
+    const op = this.db.all<OutboxOp>("select * from outbox where seq = ? and state = 'rejected'", [seq])[0];
+    if (!op || op.error_code === 'dependency_rejected' || op.error_code === 'op_expired') return false;
+    let frontier = [seq];
+    const all = [seq];
+    while (frontier.length) {
+      const kids = this.db.all<{ seq: number }>(
+        `select seq from outbox where depends_on_seq in (${frontier.map(() => '?').join(',')}) and state = 'rejected' and error_code = 'dependency_rejected'`, frontier);
+      frontier = kids.map((k) => k.seq); all.push(...frontier);
+    }
+    for (const s of all) this.db.run("update outbox set state = 'queued', error_code = null, error_message = null, attempts = 0, next_attempt_at = 0 where seq = ?", [s]);
+    return true;
+  }
+  /** Recovery: the user accepts the loss of a rejected op (and of dependents rejected because of it). */
+  discardRejected(seq: number): number {
+    let frontier = [seq]; const all = [seq];
+    while (frontier.length) {
+      const kids = this.db.all<{ seq: number }>(
+        `select seq from outbox where depends_on_seq in (${frontier.map(() => '?').join(',')}) and state = 'rejected' and error_code = 'dependency_rejected'`, frontier);
+      frontier = kids.map((k) => k.seq); all.push(...frontier);
+    }
+    return all.reduce((n, s) => n + this.db.run("update outbox set state = 'dead' where seq = ? and state = 'rejected'", [s]).changes, 0);
+  }
+  /** Earliest time a queued op becomes due again (null when nothing is waiting). */
+  nextDueAt(): number | null {
+    const r = this.db.all<{ t: number | null }>("select min(next_attempt_at) as t from outbox where state = 'queued'")[0];
+    return r?.t === null || r?.t === undefined ? null : Number(r.t);
+  }
   /** Rows the user must see in the Sync Inbox. */
   rejected(): OutboxOp[] {
     return this.db.all<OutboxOp>("select * from outbox where state = 'rejected' order by seq");

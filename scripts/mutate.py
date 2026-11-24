@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 import harness  # noqa: E402
 import test_phase2  # noqa: E402,F401
 import test_lifecycle  # noqa: E402,F401
+import test_sync_server  # noqa: E402,F401
 
 M = [
     ("0003_organizations_units_closure.sql", "perform app_private.raise_tf('cycle_detected', 'unit cannot move under itself or a descendant');", "null;", "cycle guard removed"),
@@ -79,6 +80,10 @@ M = [
     ("0016_org_read_rpcs.sql", "returns jsonb language sql stable security invoker\nset search_path = ''\nas $$\n  select pg_catalog.jsonb_build_object('ok', true, 'data', coalesce(pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(\n           'membership_id'", "returns jsonb language sql stable security definer\nset search_path = ''\nas $$\n  select pg_catalog.jsonb_build_object('ok', true, 'data', coalesce(pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(\n           'membership_id'", "0016 list_members runs as definer (bypasses RLS)"),
     ("0016_org_read_rpcs.sql", "  where m.status <> 'removed'\n$$;", "$$;", "0016 list_members shows removed members"),
     ("0016_org_read_rpcs.sql", "  from app.org_units u where u.deleted_at is null", "  from app.org_units u", "0016 list_units shows deleted units"),
+    ("0017_sync_status.sql", "p_after_xid::text::numeric > 0 and p_after_xid::text::numeric < v_floor::text::numeric", "p_after_xid::text::numeric < v_floor::text::numeric", "0017 fresh cursor forced to full resync"),
+    ("0017_sync_status.sql", "p_after_xid::text::numeric < v_floor::text::numeric)", "p_after_xid::text::numeric <= v_floor::text::numeric)", "0017 cursor at floor forced to resync"),
+    ("0017_sync_status.sql", "where f.stream = p_stream;", "where f.stream = 'personal_tasks';", "0017 floor not per stream"),
+    ("0018_complete_guard_deleted.sql", "if v_t.id is null or v_t.deleted_at is not null then", "if v_t.id is null then", "0018 completing a deleted task allowed again"),
 ]
 
 

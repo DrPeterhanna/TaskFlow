@@ -48,3 +48,14 @@ PASS  personal_recurrence_and_notes_rpcs_owner_only
 PASS  personal_dependency_cycle_across_disjoint_rows_is_serialized_by_the_user_lock
 
 46 passed, 0 failed, 46 total
+
+=== Offline Sync and Recovery phase (local only; no hosted run) ===
+python3 tests/run.py (all migrations 0001-0018):        66 passed, 0 failed
+python3 tests/run.py --migrations /tmp/tf-baseline:     49 passed, 17 failed (all 17 are 0014/0015/0016/0018 tests, see docs/SYNC_ARCHITECTURE.md section 8)
+npx vitest run (all migrations):                         11 files, 123 passed, 0 failed
+TASKFLOW_MIGRATIONS_DIR=/tmp/tf-baseline vitest:         11 files, 123 passed, 0 failed
+tsc --noEmit:                                            clean
+tests/ui_e2e.py 8/8, tests/ui_shell_e2e.py 21/21 (fake backend), tests/ui_sync_e2e.py 4/4
+tests/postgrest_local.py 13/13, tests/upgrade_nonsuper.py applies 0001-0018
+Mutation (0017 x3, 0018 x1 server): 4 killed, 0 survived. Client mutants (manual, 7): 7 killed.
+Earlier server mutants 0-64 were not rerun against the final suite.

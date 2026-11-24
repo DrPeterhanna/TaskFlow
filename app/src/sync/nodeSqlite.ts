@@ -7,6 +7,7 @@ export function openNodeSqlite(path = ':memory:'): SqlDriver {
   let depth = 0;
   return {
     exec: (sql) => db.exec(sql),
+    close: () => db.close(),
     run(sql, params = []) {
       const r = db.prepare(sql).run(...params);
       return { changes: Number(r.changes) };

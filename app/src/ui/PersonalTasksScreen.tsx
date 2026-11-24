@@ -4,7 +4,9 @@ import { useTheme } from '../design/ThemeContext';
 import { fontFamily, minTouch, radius, space, type } from '../design/tokens';
 import { isRtl, strings, type Locale } from '../i18n';
 import type { TaskStore } from '../store/TaskStore';
+import { Pressable } from 'react-native';
 import { Button, T } from './primitives';
+import { SyncPanel } from './SyncPanel';
 import { TaskRow } from './TaskRow';
 
 export function PersonalTasksScreen({ store, locale, previewNote, simulateOffline }: {
@@ -14,21 +16,29 @@ export function PersonalTasksScreen({ store, locale, previewNote, simulateOfflin
   const st = useSyncExternalStore(store.subscribe, store.getState);
   const t = strings(locale);
   const [draft, setDraft] = useState('');
+  const [panel, setPanel] = useState(false);
   const submit = () => { if (draft.trim()) { store.add(draft); setDraft(''); } };
-  const status = !st.online ? { text: t.offline, bg: th.warningBg, fg: th.warning }
+  const ph = st.sync?.phase;
+  const status = ph === 'auth_required' ? { text: t.sync.phase.auth_required!, bg: th.dangerBg, fg: th.danger }
+    : ph === 'attention' ? { text: t.sync.phase.attention!, bg: th.dangerBg, fg: th.danger }
+    : ph === 'waiting_retry' ? { text: t.sync.phase.waiting_retry!, bg: th.warningBg, fg: th.warning }
+    : !st.online ? { text: t.offline, bg: th.warningBg, fg: th.warning }
     : st.waiting > 0 ? { text: t.waiting(st.waiting), bg: th.warningBg, fg: th.warning }
     : { text: t.synced, bg: th.successBg, fg: th.success };
   return (
     <SafeAreaView style={[s.screen, { backgroundColor: th.bg, direction: isRtl(locale) ? 'rtl' : 'ltr' }]}>
       <View style={s.header}>
         <T variant="display" weight={700} accessibilityRole="header">{t.title}</T>
-        <View style={[s.chip, { backgroundColor: status.bg }]} accessibilityLiveRegion="polite" testID="sync-chip">
-          <T variant="caption" weight={600} color={status.fg}>{status.text}</T>
-        </View>
+        <Pressable accessibilityRole="button" accessibilityLabel={t.sync.open} onPress={() => setPanel((v) => !v)} disabled={!st.sync} testID="sync-chip-button">
+          <View style={[s.chip, { backgroundColor: status.bg }]} accessibilityLiveRegion="polite" testID="sync-chip">
+            <T variant="caption" weight={600} color={status.fg}>{status.text}</T>
+          </View>
+        </Pressable>
         {st.needAttention > 0 ? (
           <View style={[s.chip, { backgroundColor: th.dangerBg }]} testID="attention-chip"><T variant="caption" weight={600} color={th.danger}>{t.inbox(st.needAttention)}</T></View>
         ) : null}
       </View>
+      {panel ? <SyncPanel store={store} st={st} locale={locale} /> : null}
       <View style={s.addRow}>
         <TextInput value={draft} onChangeText={setDraft} onSubmitEditing={submit} placeholder={t.placeholder} placeholderTextColor={th.textMuted}
           accessibilityLabel={t.placeholder} returnKeyType="done" maxLength={300} testID="new-task"

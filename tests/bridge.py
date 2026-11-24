@@ -4,6 +4,9 @@ Endpoints (POST JSON): /user, /rpc, /pull, /sql (superuser, assertions only), /f
 from __future__ import annotations
 
 import json
+
+import psycopg2 as psycopg
+import os
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -71,14 +74,24 @@ class H(BaseHTTPRequestHandler):
                     body["uid"], "select app_api.sync_pull(%s, %s::xid8, %s, %s::xid8, %s)::jsonb",
                     (body["stream"], body["after_xid"], body["after_id"], body["horizon"], body["limit"]))
                 self._send(200, rows[0][0])
+            elif self.path == "/status":
+                rows = self.env.as_user(
+                    body["uid"], "select app_api.sync_status(%s, %s::xid8)::jsonb", (body["stream"], body["after_xid"]))
+                self._send(200, rows[0][0])
             else:
                 self._send(404, {"error": "unknown"})
+        except psycopg.Error as e:
+            # like PostgREST: constraint / data errors are HTTP 400 carrying the SQLSTATE; anything else is a server error
+            if (e.pgcode or "")[:2] in ("22", "23"):
+                self._send(400, {"error": str(e)[:300], "sqlstate": e.pgcode})
+            else:
+                self._send(500, {"error": f"{type(e).__name__}: {str(e)[:300]}"})
         except Exception as e:  # noqa: BLE001
             self._send(500, {"error": f"{type(e).__name__}: {str(e)[:300]}"})
 
 
 def main() -> None:
-    cluster = harness.Cluster(harness.ROOT / "supabase/migrations")
+    cluster = harness.Cluster(Path(os.environ.get("TASKFLOW_MIGRATIONS_DIR", str(harness.ROOT / "supabase/migrations"))))
     H.env = cluster.fresh()
     srv = ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1]) if len(sys.argv) > 1 else 0), H)
     print(f"READY {srv.server_address[1]}", flush=True)

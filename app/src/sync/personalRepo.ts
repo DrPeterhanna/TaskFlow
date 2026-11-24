@@ -42,6 +42,22 @@ export class PersonalTaskRepo {
     });
   }
 
+  /** Edit fields. Sends ONLY the edited fields so a concurrent edit of other fields on another device is not overwritten. */
+  update(id: string, patch: { title?: string; planned_date?: string | null; priority?: string | null; notes?: string | null }): void {
+    const keys = Object.keys(patch);
+    if (keys.length === 0) throw new Error('nothing to update');
+    if (patch.title !== undefined) {
+      const t = patch.title.trim();
+      if (t.length < 1 || t.length > 300) throw new Error('title must be 1 to 300 characters');
+      patch = { ...patch, title: t };
+    }
+    this.db.transaction(() => {
+      if (!this.get(id)) throw new Error('task not found locally');
+      this.patch(id, patch as Record<string, unknown>);
+      this.outbox.enqueue({ rpc: 'update_personal_task', entityType: 'personal_tasks', entityId: id, args: [id, patch] });
+    });
+  }
+
   remove(id: string): void {
     this.db.transaction(() => {
       if (!this.get(id)) throw new Error('task not found locally');

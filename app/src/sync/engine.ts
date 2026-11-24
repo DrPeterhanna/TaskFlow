@@ -2,6 +2,8 @@ import { backoffMs, Outbox } from './outbox';
 import type { Clock, RpcClient, SqlDriver } from './types';
 import { systemClock, TransportError } from './types';
 
+export const TRACKED_FIELDS = ['title', 'status', 'parent_id', 'planned_date', 'priority', 'notes', 'due_date', 'estimate_min'] as const;
+
 export type SyncStatus = 'idle' | 'waiting' | 'paused_unauthorized';
 
 export interface PushReport { sent: number; acked: number; rejected: number; status: SyncStatus }
@@ -59,6 +61,7 @@ export class SyncEngine {
   private rollbackRejected(ops: Array<{ entity_type: string; entity_id: string }>): void {
     for (const o of ops) {
       if (this.outbox.hasLiveOps(o.entity_type, o.entity_id)) continue;
+      this.settle(o.entity_type, o.entity_id, 'rejected');
       const r = this.db.all<{ base_json: string | null; change_xid: string | null }>(
         'select base_json, change_xid from local_rows where stream = ? and id = ?', [o.entity_type, o.entity_id])[0];
       if (!r) continue;
@@ -77,7 +80,69 @@ export class SyncEngine {
     this.db.run("update local_rows set change_xid = coalesce(change_xid, '0') where stream = ? and id = ?", [entityType, entityId]);
     // A later queued op on the same entity keeps it pending.
     const more = this.db.all("select 1 as x from outbox where entity_type = ? and entity_id = ? and state in ('queued','inflight')", [entityType, entityId]);
-    if (more.length === 0) this.db.run('update local_rows set pending = 0, base_json = null where stream = ? and id = ?', [entityType, entityId]);
+    if (more.length === 0) {
+      this.db.run('update local_rows set pending = 0, base_json = null where stream = ? and id = ?', [entityType, entityId]);
+      this.settle(entityType, entityId, 'acked');
+    }
+  }
+
+  /**
+   * All local ops for an entity are done. (1) Conflicts: an acked op means the server applied our edit AFTER the other
+   * device's (field-level last-writer-wins in server order), a rejected op means the server value stands. (2) Server rows
+   * we skipped while the op was pending are fetched again by rewinding the stream cursor to just before them.
+   */
+  private settle(stream: string, id: string, outcome: 'acked' | 'rejected'): void {
+    const target = outcome === 'acked' ? 'applied' : 'moot';
+    this.db.run(`delete from sync_conflicts where stream = ? and entity_id = ? and state = ?
+                 and exists (select 1 from sync_conflicts o where o.stream = sync_conflicts.stream and o.entity_id = sync_conflicts.entity_id and o.kind = sync_conflicts.kind and o.field = sync_conflicts.field and o.state = 'open')`, [stream, id, target]);
+    this.db.run("update sync_conflicts set state = ? where stream = ? and entity_id = ? and state = 'open'", [target, stream, id]);
+    const sk = this.db.all<{ xid: string }>('select xid from skipped_rows where stream = ? and id = ?', [stream, id])[0];
+    if (!sk) return;
+    this.db.run('delete from skipped_rows where stream = ? and id = ?', [stream, id]);
+    const rewind = (BigInt(sk.xid) - 1n).toString();
+    const cur = this.db.all<{ after_xid: string }>('select after_xid from sync_cursor where stream = ?', [stream])[0];
+    if (cur && BigInt(cur.after_xid) > BigInt(rewind)) {
+      this.db.run("update sync_cursor set after_xid = ?, after_id = '' where stream = ?", [rewind, stream]);
+    }
+  }
+
+  /** Remember that a server row was not applied because a local op is pending, and record any concurrent-edit conflict. */
+  private deferServerRow(stream: string, r: Record<string, unknown> & { id: string; change_xid: string; deleted_at?: string | null }): void {
+    const ex = this.db.all<{ xid: string }>('select xid from skipped_rows where stream = ? and id = ?', [stream, r.id])[0];
+    if (!ex || BigInt(r.change_xid) < BigInt(ex.xid)) {
+      this.db.run('insert into skipped_rows (stream, id, xid) values (?,?,?) on conflict (stream, id) do update set xid = excluded.xid', [stream, r.id, r.change_xid]);
+    }
+    const loc = this.db.all<{ data_json: string; base_json: string | null }>('select data_json, base_json from local_rows where stream = ? and id = ?', [stream, r.id])[0];
+    if (!loc || loc.base_json === null) return;            // row never confirmed by the server: nothing to conflict with
+    const base = JSON.parse(loc.base_json) as Record<string, unknown>;
+    const mine = JSON.parse(loc.data_json) as Record<string, unknown>;
+    const now = this.clock.now();
+    if (r.deleted_at) {
+      this.db.run(`insert into sync_conflicts (stream, entity_id, kind, field, state, detected_at) values (?,?, 'deleted_remotely', '', 'open', ?)
+                   on conflict (stream, entity_id, kind, field, state) do nothing`, [stream, r.id, now]);
+      return;
+    }
+    for (const f of TRACKED_FIELDS) {
+      const b = JSON.stringify(base[f] ?? null), m = JSON.stringify(mine[f] ?? null), sv = JSON.stringify((r as Record<string, unknown>)[f] ?? null);
+      if (m !== b && sv !== b && sv !== m) {       // both sides changed the same field to different values
+        this.db.run(`insert into sync_conflicts (stream, entity_id, kind, field, base_value, local_value, server_value, state, detected_at) values (?,?, 'field', ?,?,?,?, 'open', ?)
+                     on conflict (stream, entity_id, kind, field, state) do update set server_value = excluded.server_value, local_value = excluded.local_value`,
+          [stream, r.id, f, b, m, sv, now]);
+      }
+    }
+  }
+
+  /**
+   * Discard the non-pending local copy of a stream and fetch it again from zero. Rows with unsent local ops are kept
+   * (never lose user work). Used when the server says the cursor is older than its purge floor, and as a manual repair.
+   */
+  async fullResync(stream: string): Promise<number> {
+    this.db.transaction(() => {
+      this.db.run('delete from sync_cursor where stream = ?', [stream]);
+      this.db.run('delete from skipped_rows where stream = ?', [stream]);
+      this.db.run('delete from local_rows where stream = ? and pending = 0', [stream]);
+    });
+    return this.pull(stream, 200, true);
   }
 
   /**
@@ -85,10 +150,14 @@ export class SyncEngine {
    * resumes exactly after the last applied page. Server rows overwrite local rows that have no pending op;
    * rows with a pending op keep the optimistic value until their op is acked (the next pull then converges).
    */
-  async pull(stream: string, limit = 200): Promise<number> {
+  async pull(stream: string, limit = 200, skipStatusCheck = false): Promise<number> {
     let applied = 0;
     const cur = this.db.all<{ after_xid: string; after_id: string; horizon: string | null }>('select * from sync_cursor where stream = ?', [stream])[0]
       ?? { after_xid: '0', after_id: '', horizon: null };
+    if (!skipStatusCheck && cur.after_xid !== '0' && this.rpc.status) {
+      const st = await this.rpc.status(stream, cur.after_xid);
+      if (st.full_resync_required) return this.fullResync(stream);
+    }
     let { after_xid, after_id } = cur;
     let horizon: string | null = null;   // a fresh horizon per pull run; pinned across its pages
     for (;;) {
@@ -97,7 +166,7 @@ export class SyncEngine {
       this.db.transaction(() => {
         for (const r of page.rows) {
           const local = this.db.all<{ pending: number }>('select pending from local_rows where stream = ? and id = ?', [stream, r.id])[0];
-          if (local && local.pending) continue;
+          if (local && local.pending) { this.deferServerRow(stream, r); continue; }
           this.db.run(
             `insert into local_rows (stream, id, data_json, change_xid, pending, deleted) values (?,?,?,?,0,?)
              on conflict (stream, id) do update set data_json = excluded.data_json, change_xid = excluded.change_xid, deleted = excluded.deleted, base_json = null`,
