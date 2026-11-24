@@ -244,3 +244,31 @@ def lifecycle_guard_lock_serialises_deterministically(env: Env) -> None:
     th.join()
     assert "last admin: transfer" in res[0][0], res
     assert user_exists(env, f.sup)
+
+
+@test
+def my_membership_reports_own_state_only(env: Env) -> None:
+    f = fixture(env)
+    r = env.as_user(f.mem, "select app_api.my_membership()")[0][0]
+    assert r["ok"] and r["data"]["membership"]["org_id"] == f.org and r["data"]["membership"]["role"] == "member"
+    lone = env.user("nom@t.test", name="No")
+    r2 = env.as_user(lone, "select app_api.my_membership()")[0][0]
+    assert r2["ok"] and r2["data"]["membership"] is None
+    expect_tf("unauthenticated", lambda: env.as_user(None, "select app_api.my_membership()"))
+    # removed members see no membership
+    delete_user(env, f.mem)
+    expect_tf("unauthenticated", lambda: env.as_user(f.mem, "select app_api.my_membership()"))
+
+
+@test
+def my_membership_verified_flag_and_closed_org(env: Env) -> None:
+    u = env.user("unv@t.test", name="U")
+    env.su("update auth.users set email_confirmed_at = null where id=%s", (u,))
+    assert env.as_user(u, "select app_api.my_membership()")[0][0]["data"]["email_verified"] is False
+    env.su("update auth.users set email_confirmed_at = now() where id=%s", (u,))
+    assert env.as_user(u, "select app_api.my_membership()")[0][0]["data"]["email_verified"] is True
+    r = env.rpc(u, "create_organization", "Solo", "Africa/Cairo")
+    assert r["ok"]
+    assert env.as_user(u, "select app_api.my_membership()")[0][0]["data"]["membership"]["org_name"] == "Solo"
+    assert env.rpc(u, "close_organization")["ok"]
+    assert env.as_user(u, "select app_api.my_membership()")[0][0]["data"]["membership"] is None

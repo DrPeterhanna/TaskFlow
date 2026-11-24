@@ -73,6 +73,9 @@ M = [
     ('0014_account_lifecycle.sql', '  select p.id from app.profiles p where p.auth_user_id = auth.uid() and p.deleted_at is null\n', '  select p.id from app.profiles p where p.auth_user_id = auth.uid()\n', '0014 deleted profile still authenticates (uid)'),
     ('0014_account_lifecycle.sql', "  if v is null then perform app_private.raise_tf('unauthenticated'); end if;", '  null;', '0014 require_uid does not reject'),
     ('0014_account_lifecycle.sql', '                          auth_user_id = null, deleted_at', '                          deleted_at', '0014 profile keeps auth link after deletion'),
+    ("0015_my_membership.sql", "where m.user_id = v_uid and m.status <> 'removed'", "where m.status <> 'removed'", "0015 my_membership leaks other users"),
+    ("0015_my_membership.sql", "and o.deleted_at is null", "", "0015 closed org still reported"),
+    ("0015_my_membership.sql", "u.email_confirmed_at is not null", "true", "0015 email always verified"),
 ]
 
 

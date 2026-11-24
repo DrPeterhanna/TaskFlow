@@ -10,6 +10,8 @@ import { createPreviewClient, previewCreateUser } from './src/store/previewHttpC
 import { createSqliteStore } from './src/store/sqliteStore';
 import { createSqlJsDriver } from './src/store/webSqlJsDriver';
 import type { TaskStore } from './src/store/TaskStore';
+import { HostedEntry, hostedAvailable } from './src/ui/HostedEntry';
+import { PreviewShell } from './src/ui/PreviewShell';
 import { PersonalTasksScreen } from './src/ui/PersonalTasksScreen';
 
 /**
@@ -26,10 +28,12 @@ export default function App() {
   const [offline, setOffline] = useState(q.get('offline') === '1');
   const offlineRef = useMemo(() => ({ v: q.get('offline') === '1' }), []);
   offlineRef.v = offline;
+  const previewShell = q.get('shell') as 'auth' | 'verify' | 'gate' | 'home' | null;
   const [store, setStore] = useState<TaskStore | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
+    if (previewShell) return;
     let cancelled = false;
     (async () => {
       if (!bridge) {
@@ -55,6 +59,8 @@ export default function App() {
   // coming back online triggers a sync, like regaining connectivity on a device
   useEffect(() => { if (!offline && store && 'connectivityRestored' in store) void (store as unknown as { connectivityRestored(): Promise<void> }).connectivityRestored(); }, [offline, store]);
 
+  if (fontsLoaded && previewShell) return <ThemeProvider value={theme}><PreviewShell locale={locale} start={previewShell} /></ThemeProvider>;
+  if (fontsLoaded && !previewShell && hostedAvailable && process.env.EXPO_PUBLIC_TASKFLOW_ENV) return <ThemeProvider value={theme}><HostedEntry locale={locale} /></ThemeProvider>;
   if (!fontsLoaded || (!store && !err)) return <View style={{ flex: 1, justifyContent: 'center' }}><ActivityIndicator accessibilityLabel={strings(locale).loading} /></View>;
   if (err || !store) return <View style={{ padding: 24 }}>{null}</View>;
   return (
