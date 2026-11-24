@@ -355,3 +355,11 @@ def list_rpcs_follow_rls_authority_down(env: Env) -> None:
     assert q(f.mem, "list_members")["data"] == []
     # units: scoped to own org
     assert _ids(q(f.admin, "list_units"), "id") and not (_ids(q(f.admin, "list_units"), "id") & _ids(q(f.outsider, "list_units"), "id"))
+
+
+@test
+def list_units_hides_soft_deleted_units(env: Env) -> None:
+    f = fixture(env)
+    env.su("update app.org_units set deleted_at = now() where id=%s", (f.u2,))
+    ids = {str(x["id"]) for x in env.as_user(f.admin, "select app_api.list_units()")[0][0]["data"]}
+    assert f.u1 in ids and f.u2 not in ids
