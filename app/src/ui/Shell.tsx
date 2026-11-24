@@ -7,14 +7,16 @@ import { strings, type Locale } from '../i18n';
 import { routeFor, type createShellApi, type Me, type ShellError } from '../shell/shellModel';
 import type { TaskStore } from '../store/TaskStore';
 import { AuthScreen, Screen } from './AuthScreens';
-import { OrgGateScreen, OrgHome } from './OrgScreens';
+import { OrgGateScreen } from './OrgScreens';
+import { OrgManage } from './OrgManage';
+import type { OrgAdminApi } from '../shell/orgAdmin';
 import { PersonalTasksScreen } from './PersonalTasksScreen';
 import { Button, T } from './primitives';
 
 type Api = ReturnType<typeof createShellApi>;
 
 /** Signed-in navigation: auth -> verify email -> join/create organization -> tabs. The route is derived, never stored. */
-export function Shell({ auth, api, makeStore, locale }: { auth: AuthController; api: Api; makeStore: (userId: string) => TaskStore; locale: Locale }) {
+export function Shell({ auth, api, makeStore, locale, adminApi }: { auth: AuthController; api: Api; adminApi: OrgAdminApi; makeStore: (userId: string) => TaskStore; locale: Locale }) {
   const a = useSyncExternalStore(auth.subscribe, auth.getState);
   const t = strings(locale);
   const th = useTheme();
@@ -50,7 +52,7 @@ export function Shell({ auth, api, makeStore, locale }: { auth: AuthController; 
     <View style={{ flex: 1, backgroundColor: th.bg }}>
       <View style={{ flex: 1 }}>
         {tab === 'tasks' && store ? <PersonalTasksScreen store={store} locale={locale} />
-          : <OrgHome locale={locale} membership={m} email={a.session?.email ?? ''} onSignOut={() => void auth.signOut()} />}
+          : <OrgManage locale={locale} membership={m} email={a.session?.email ?? ''} api={adminApi} onSignOut={() => void auth.signOut()} onLeft={() => void refresh()} />}
       </View>
       <View accessibilityRole="tablist" style={{ flexDirection: 'row', borderTopWidth: 1, borderColor: th.border, backgroundColor: th.surface }}>
         {([['tasks', t.org.tabTasks], ['org', t.org.tabOrg]] as const).map(([k, label]) => (

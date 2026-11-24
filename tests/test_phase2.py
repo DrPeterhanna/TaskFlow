@@ -110,7 +110,8 @@ def lint_clients_have_no_write_privileges_and_anon_has_none(env: Env) -> None:
                          "update_personal_task", "reopen_personal_task", "delete_personal_task", "restore_personal_task",
                          "reorder_personal_task", "add_personal_dependency", "remove_personal_dependency",
                          "set_personal_recurrence", "clear_personal_recurrence", "update_personal_note",
-                         "delete_personal_note", "leave_organization", "close_organization", "my_membership"}, callable_
+                         "delete_personal_note", "leave_organization", "close_organization", "my_membership",
+                         "list_members", "list_invitations", "list_units"}, callable_
     priv = env.su("""select p.proname from pg_proc p join pg_namespace n on n.oid=p.pronamespace
         where n.nspname='app_private' and has_function_privilege('authenticated', p.oid, 'execute') order by 1""")
     assert {r[0] for r in priv} == {"my_membership_id", "is_active_member", "me_has_authority_over_membership",

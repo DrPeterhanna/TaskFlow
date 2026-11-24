@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo } from 'react';
 import { createAuthController, createSupabaseAuthApi } from '../auth/authController';
+import { createOrgAdminApi } from '../shell/orgAdmin';
 import { createShellApi } from '../shell/shellModel';
 import { createSupabase } from '../supabase/client';
 import { createSupabaseRpcClient } from '../supabase/rpcClient';
@@ -10,15 +11,16 @@ import { Shell } from './Shell';
 
 /** Device/hosted entry. Needs an explicit EXPO_PUBLIC_TASKFLOW_ENV (see supabase/config.ts). NOT run against any real Supabase yet. */
 export function HostedApp({ locale }: { locale: Locale }) {
-  const { sb, auth, api } = useMemo(() => {
+  const { sb, auth, api, adminApi } = useMemo(() => {
     const sb = createSupabase();
     const rpc = createSupabaseRpcClient(sb);
-    return { sb, auth: createAuthController(createSupabaseAuthApi(sb)), api: createShellApi((fn, args) => sb.schema('app_api').rpc(fn, args) as never, rpc) };
+    const read = (fn: string, args: Record<string, unknown>) => sb.schema('app_api').rpc(fn, args) as never;
+    return { sb, adminApi: createOrgAdminApi(read, rpc), auth: createAuthController(createSupabaseAuthApi(sb)), api: createShellApi((fn, args) => sb.schema('app_api').rpc(fn, args) as never, rpc) };
   }, []);
   useEffect(() => { void auth.start(); return () => auth.dispose(); }, [auth]);
   const makeStore = useMemo(() => {
     const rpc = createSupabaseRpcClient(sb);
     return (userId: string) => createSqliteStore(openAccountDb(userId), rpc);
   }, [sb]);
-  return <Shell auth={auth} api={api} makeStore={makeStore} locale={locale} />;
+  return <Shell auth={auth} api={api} adminApi={adminApi} makeStore={makeStore} locale={locale} />;
 }

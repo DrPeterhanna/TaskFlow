@@ -323,3 +323,35 @@ def my_membership_hides_a_soft_deleted_org_even_if_membership_row_is_active(env:
     f = fixture(env)
     env.su("update app.organizations set deleted_at = now() where id=%s", (f.org,))
     assert env.as_user(f.mem, "select app_api.my_membership()")[0][0]["data"]["membership"] is None
+
+
+def _ids(r, key):
+    return {str(x[key]) for x in r["data"]}
+
+
+@test
+def list_rpcs_follow_rls_authority_down(env: Env) -> None:
+    f = fixture(env)
+    q = lambda who, fn: env.as_user(who, f"select app_api.{fn}()")[0][0]  # noqa: E731
+    admin_m = _ids(q(f.admin, "list_members"), "membership_id")
+    assert set(f.mid.values()) <= admin_m | set()                                    # admin sees everyone in the org
+    sup_m = _ids(q(f.sup, "list_members"), "membership_id")
+    assert f.mid["sup"] in sup_m and f.mid["admin"] not in sup_m                     # supervisor: self + below, never up
+    mem_m = q(f.mem, "list_members")["data"]
+    assert [x["membership_id"] for x in mem_m] == [f.mid["mem"]] and mem_m[0]["is_me"] is True
+    assert all(set(x) == {"membership_id", "display_name", "role", "status", "unit_id", "is_me"} for x in q(f.admin, "list_members")["data"])
+    # outsider (no org) sees nothing
+    lone = env.user("lone2@t.test", name="L")
+    assert q(lone, "list_members")["data"] == [] and q(lone, "list_units")["data"] == [] and q(lone, "list_invitations")["data"] == []
+    assert not (_ids(q(f.outsider, "list_members"), "membership_id") & set(f.mid.values()))
+    # invitations: admin sees all, plain member none, and never the code or its hash
+    inv = env.rpc(f.admin, "create_invitation", "member", f.u1a, 1, FUTURE)
+    assert inv["ok"]
+    li = q(f.admin, "list_invitations")["data"]
+    assert len(li) >= 1 and all("code" not in x and "code_hash" not in x for x in li)
+    assert q(f.mem, "list_invitations")["data"] == []
+    # a removed member's lists are empty
+    env.rpc(f.admin, "set_member_status", f.mid["mem"], "removed")
+    assert q(f.mem, "list_members")["data"] == []
+    # units: scoped to own org
+    assert _ids(q(f.admin, "list_units"), "id") and not (_ids(q(f.admin, "list_units"), "id") & _ids(q(f.outsider, "list_units"), "id"))

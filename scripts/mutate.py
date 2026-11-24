@@ -76,6 +76,9 @@ M = [
     ("0015_my_membership.sql", "where m.user_id = v_uid and m.status <> 'removed'", "where m.status <> 'removed'", "0015 my_membership leaks other users"),
     ("0015_my_membership.sql", "and o.deleted_at is null", "", "0015 closed org still reported"),
     ("0015_my_membership.sql", "u.email_confirmed_at is not null", "true", "0015 email always verified"),
+    ("0016_org_read_rpcs.sql", "returns jsonb language sql stable security invoker\nset search_path = ''\nas $$\n  select pg_catalog.jsonb_build_object('ok', true, 'data', coalesce(pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(\n           'membership_id'", "returns jsonb language sql stable security definer\nset search_path = ''\nas $$\n  select pg_catalog.jsonb_build_object('ok', true, 'data', coalesce(pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(\n           'membership_id'", "0016 list_members runs as definer (bypasses RLS)"),
+    ("0016_org_read_rpcs.sql", "  where m.status <> 'removed'\n$$;", "$$;", "0016 list_members shows removed members"),
+    ("0016_org_read_rpcs.sql", "  from app.org_units u where u.deleted_at is null", "  from app.org_units u", "0016 list_units shows deleted units"),
 ]
 
 
