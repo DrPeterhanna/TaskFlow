@@ -2,7 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { TransportError, type PullPage, type RpcClient, type RpcResult } from '../sync/types';
 import params from './rpcParams.generated.json';
 
-type Call = (fn: string, args: Record<string, unknown>) => Promise<{ data: unknown; error: null | { message: string; code?: string }; status: number }>;
+type Call = (fn: string, args: Record<string, unknown>) => Promise<{ data: unknown; error: null | { message: string; code?: string; details?: string | null }; status: number }>;
 
 /**
  * RpcClient over Supabase PostgREST. The app only ever calls the app_api schema (positional args -> named params,
@@ -20,7 +20,13 @@ export function createRpcClientFrom(call: Call): RpcClient {
     if (r.error) {
       if (r.status === 401 || r.status === 403 && /jwt/i.test(r.error.message)) throw new TransportError(r.error.message, 'unauthorized');
       if (r.status === 0 || r.status >= 500) throw new TransportError(r.error.message, r.status === 0 ? 'network' : 'server');
-      return { ok: false, code: 'validation', message: r.error.message };
+      // TaskFlow business errors are raised as SQLSTATE TFxxx with a JSON detail {"code","message"}; PostgREST returns them as HTTP 4xx.
+      if (r.error.code && /^TF/.test(r.error.code)) {
+        let code = r.error.code;
+        try { const d = JSON.parse(r.error.details ?? '{}') as { code?: string }; if (d.code) code = d.code; } catch { /* keep SQLSTATE */ }
+        return { ok: false, code, message: r.error.message };
+      }
+      throw new TransportError(`unexpected REST error ${r.status}: ${r.error.message}`, 'server');
     }
     return r.data;
   };

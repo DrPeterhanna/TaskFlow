@@ -18,6 +18,8 @@ describe('supabase rpc adapter (mocked transport, NOT a hosted test)', () => {
     const mk = (status: number) => createRpcClientFrom(async () => ({ data: null, error: { message: 'x' }, status }));
     await expect(mk(401).pull('personal', '0', '', null, 5)).rejects.toMatchObject({ kind: 'unauthorized' });
     await expect(mk(503).pull('personal', '0', '', null, 5)).rejects.toBeInstanceOf(TransportError);
-    expect(await mk(400).call('complete_personal_task', ['a'], 'o')).toMatchObject({ ok: false });
+    const biz = createRpcClientFrom(async () => ({ data: null, error: { message: 'op_expired', code: 'TF014', details: '{"code" : "op_expired", "message" : "x"}' }, status: 400 }));
+    expect(await biz.call('complete_personal_task', ['a'], 'o')).toEqual({ ok: false, code: 'op_expired', message: 'op_expired' });
+    await expect(mk(400).call('complete_personal_task', ['a'], 'o')).rejects.toBeInstanceOf(TransportError);
   });
 });

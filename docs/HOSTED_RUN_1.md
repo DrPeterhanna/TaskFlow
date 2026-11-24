@@ -19,3 +19,5 @@ Real authenticated JWT tests (RLS per role, RPC flows, sync_pull) need a confirm
 - 46 of 46 local Postgres tests pass after the 0001 amendment (superuser, clean DB).
 - tests/upgrade_nonsuper.py: all 13 migrations apply as a NON-superuser CREATEROLE user (hosted-like) on local PG 16: 13 of 13 applied.
 - Dashboard browser route: saved browser profile not signed in to Supabase; no dashboard credential held.
+- tests/postgrest_local.py: standalone PostgREST v16.6 on LOCAL PG, self-signed HS256 JWTs. NOT Supabase (no GoTrue, no gateway). 10 of 10 pass: anon denied, schema app not exposed, expired JWT rejected, named-parameter RPC call works, op-id replay idempotent, sync_pull isolation between two users, cross-user completion refused.
+  Finding: business errors surface over REST as HTTP 400 with SQLSTATE TFxxx and JSON details, not as {ok:false}. The adapter now maps them to {ok:false, code}; unexpected 4xx become TransportError (retry-safe). Test updated (mocked transport).
