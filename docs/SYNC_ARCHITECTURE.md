@@ -22,7 +22,7 @@ Startup: `recoverInflight()` returns ops that were mid-send when the app died to
 
 ## 3. Conflict policy (explicit)
 * Unit of conflict: a field. The client sends only the fields the user edited, so edits to different fields on two devices both survive.
-* Same field edited on two devices: **last writer wins in the order requests reach the server.** This is deterministic and server-decided.
+* Same field edited on two devices: **no silent overwrite.** An edit made from a value the device did not see is refused by the server (0019, atomic under the row lock); the user decides (apply mine with a fresh base, or use the other value). Last-writer-wins applies only to edits made from the current value. complete, reopen and delete are not yet conditional (see SYNC_STATUS.md).
 * The user is told, not silently overwritten. Detection: primarily SERVER-reported (0019, closes the pull-then-push race); the client-side pull check remains as a second source: when a pull meets a row with a pending local op,
   the server row is not applied over the user's edit; if both sides changed the same field to different values a `sync_conflicts`
   record is created. After our op is acknowledged the record is "applied" (our value is now in effect) and the Sync panel offers

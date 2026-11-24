@@ -37,7 +37,7 @@ describe('concurrent edits on two devices (real local PG, one user)', () => {
     expect(b.repo.get(id)).toMatchObject({ title: 'Plan v2', planned_date: '2026-12-24' });
     expect(a.db.all('select * from sync_conflicts')).toHaveLength(0);
   });
-  it('same field: last op to reach the server wins, the loser sees a conflict and can restore the other value', async () => {
+  it('same field: the stale edit is refused (nothing overwritten); "apply mine" re-reads and applies atomically with a fresh base', async () => {
     const uid = await bridge.user('c2@test.dev');
     const db = openNodeSqlite();
     const store = createSqliteStore(db, bridge.client(uid), { autoSync: false });
@@ -45,17 +45,18 @@ describe('concurrent edits on two devices (real local PG, one user)', () => {
     store.add('Shared title'); await store.sync();
     await b.engine.pull('personal_tasks');
     const id = b.repo.list()[0]!.id;
-    // device A (store) edits offline via its repo; device B edits the same field and reaches the server first
     new PersonalTaskRepo(db, new Outbox(db)).update(id, { title: 'From A' });
     b.repo.update(id, { title: 'From B' }); await b.engine.push();
-    await store.sync();                                         // A: pull defers B's row (conflict recorded), push applies A last
-    expect(await serverTitle(id)).toBe('From A');
-    const item = store.getState().inbox!.find((i) => i.kind === 'conflict');
-    expect(item).toMatchObject({ kind: 'conflict', field: 'title', restorable: true });
-    store.restoreOtherValue!((item as { id: number }).id);
     await store.sync();
-    expect(await serverTitle(id)).toBe('From B');
-    expect(store.getState().inbox!.filter((i) => i.kind === 'conflict')).toHaveLength(0);
+    expect(await serverTitle(id)).toBe('From B');                              // B's value survived
+    const item = store.getState().inbox!.find((i) => i.kind === 'rejected');
+    expect(item).toMatchObject({ kind: 'rejected', code: 'stale_conflict' });
+    expect(store.getState().sync!.phase).toBe('attention');
+    store.keepMineAfterConflict!((item as { seq: number }).seq);
+    await new Promise((r) => setTimeout(r, 300));
+    await store.sync();
+    expect(await serverTitle(id)).toBe('From A');
+    expect(store.getState().inbox!.filter((i) => i.kind === 'rejected')).toHaveLength(0);
     expect(store.getState().sync!.phase).toBe('synced');
   });
   it('remote delete while a local edit is pending: server rejects the edit, tombstone wins, nothing resurrects', async () => {
@@ -186,16 +187,16 @@ describe('local data cannot bypass server authorization (real local PG)', () => 
 });
 
 describe('pull-then-push race closed by the server (0019, real local PG)', () => {
-  it('a remote edit that lands AFTER our last pull but BEFORE our push is reported by the server and shown as a conflict', async () => {
+  it('a remote edit that lands AFTER our last pull but BEFORE our push is refused by the server atomically', async () => {
     const uid = await bridge.user('race1@test.dev');
     const a = await device(uid), b = await device(uid);
     const id = await synced(a, b, 'Base');
-    a.repo.update(id, { title: 'A wins last' });          // A has pulled everything it will see; now B sneaks in
+    a.repo.update(id, { title: 'A stale' });
     b.repo.update(id, { title: 'B in between' }); await b.engine.push();
-    await a.engine.push();                                  // no pull in between: client-only detection cannot see B
-    expect(await serverTitle(id)).toBe('A wins last');
-    const c = a.db.all<{ field: string; state: string; server_value: string; local_value: string }>('select field, state, server_value, local_value from sync_conflicts');
-    expect(c).toEqual([{ field: 'title', state: 'applied', server_value: '"B in between"', local_value: '"A wins last"' }]);
+    const rep = await a.engine.push();                                  // no pull in between
+    expect(rep.rejected).toBe(1);
+    expect(await serverTitle(id)).toBe('B in between');
+    expect(a.db.all<{ error_code: string }>("select error_code from outbox where state = 'rejected'")[0]!.error_code).toBe('stale_conflict');
   });
   it('no conflict when the other device changed a different field', async () => {
     const uid = await bridge.user('race2@test.dev');
@@ -207,17 +208,18 @@ describe('pull-then-push race closed by the server (0019, real local PG)', () =>
     expect(a.db.all('select * from sync_conflicts')).toHaveLength(0);
     expect(await bridge.sql(`select title, planned_date::text from app.personal_tasks where id = '${id}'`)).toEqual([['Only title', '2026-12-30']]);
   });
-  it('baseline fallback: a server without 0019 gets the plain update with the same op id', async () => {
+  it('a server without 0019 does NOT get a weaker unchecked call: the op stays queued with its intent and the engine reports blocked', async () => {
     const uid = await bridge.user('race3@test.dev');
     const a = await device(uid); const id = a.repo.create('X'); await a.engine.push();
     const real = bridge.client(uid);
     const old: typeof real = { ...real, call: async (rpc, args, op) => (rpc === 'update_personal_task_checked' ? ({ ok: false, code: 'unsupported' } as never) : real.call(rpc, args, op)) };
     const e2 = new SyncEngine(a.db, a.outbox, old, undefined, () => 0);
     a.repo.update(id, { title: 'Y' });
-    const opId = a.db.all<{ op_id: string }>("select op_id from outbox where state = 'queued'")[0]!.op_id;
     await e2.push();
-    expect(await serverTitle(id)).toBe('Y');
-    expect(a.db.all<{ op_id: string; rpc: string }>("select op_id, rpc from outbox where op_id = ?", [opId])[0]!.rpc).toBe('update_personal_task');
+    expect(e2.blocked).toBe('server_update_required');
+    expect(await serverTitle(id)).toBe('X');
+    const op = a.db.all<{ rpc: string; state: string }>("select rpc, state from outbox where entity_id = ? order by seq desc", [id])[0]!;
+    expect(op).toEqual({ rpc: 'update_personal_task_checked', state: 'queued' });
   });
 });
 

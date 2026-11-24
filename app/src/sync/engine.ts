@@ -10,6 +10,8 @@ export interface PushReport { sent: number; acked: number; rejected: number; sta
 
 export class SyncEngine {
   status: SyncStatus = 'idle';
+  /** Set when the server cannot process queued work (missing migration). Cleared by the next successful push. */
+  blocked: 'server_update_required' | null = null;
   constructor(
     private db: SqlDriver,
     readonly outbox: Outbox,
@@ -21,6 +23,7 @@ export class SyncEngine {
   /** Push until the queue is empty, an op is waiting out a backoff, or the transport fails. */
   async push(): Promise<PushReport> {
     const rep: PushReport = { sent: 0, acked: 0, rejected: 0, status: 'idle' };
+    this.blocked = null;
     if (this.status === 'paused_unauthorized') { rep.status = this.status; return rep; }
     for (;;) {
       const op = this.outbox.next();
@@ -31,13 +34,14 @@ export class SyncEngine {
         const res = await this.rpc.call(op.rpc, JSON.parse(op.args_json) as unknown[], op.op_id);
         this.db.transaction(() => {
           if (res.ok) { this.outbox.ack(op.seq); this.recordOverwrites(op, res); this.clearPending(op.entity_type, op.entity_id); }
-          else if (res.code === 'unsupported' && op.rpc === 'update_personal_task_checked') {
-            // Server without migration 0019: fall back to the plain update (client-side conflict detection only). Same op_id is kept.
-            const a = JSON.parse(op.args_json) as unknown[];
-            this.db.run("update outbox set rpc = 'update_personal_task', args_json = ?, state = 'queued', attempts = 0, next_attempt_at = 0 where seq = ?", [JSON.stringify([a[0], a[1]]), op.seq]);
+          else if (res.code === 'unsupported') {
+            // The server lacks a function this op needs (migration not applied). NEVER fall back to a weaker unchecked call:
+            // the op stays queued with its intent, same op_id, and the user is told the server needs updating.
+            this.outbox.retryLater(op.seq, 300_000);
+            this.blocked = 'server_update_required';
           } else { this.rollbackRejected(this.outbox.reject(op.seq, res.code, res.message)); }
         });
-        if (res.ok) rep.acked++; else if (res.code === 'unsupported' && op.rpc === 'update_personal_task_checked') rep.sent--; else rep.rejected++;
+        if (res.ok) rep.acked++; else if (res.code === 'unsupported' && op.rpc === 'update_personal_task_checked') { rep.sent--; rep.status = 'waiting'; return rep; } else rep.rejected++;
       } catch (e) {
         if (!(e instanceof TransportError)) throw e;
         if (e.kind === 'unauthorized') {

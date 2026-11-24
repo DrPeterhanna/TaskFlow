@@ -21,8 +21,8 @@ class Srv implements RpcClient {
         const cur = this.rows.get(id) as unknown as Record<string, unknown>, base = (args[2] ?? {}) as Record<string, unknown>, patch = args[1] as Record<string, unknown>;
         const over: Record<string, unknown> = {};
         for (const k of Object.keys(patch)) if (k in base && JSON.stringify(cur[k] ?? null) !== JSON.stringify(base[k]) && JSON.stringify(cur[k] ?? null) !== JSON.stringify(patch[k])) over[k] = cur[k] ?? null;
-        this.put({ id, ...patch });
-        res = { ok: true, data: { id, overwritten: over } } as RpcResult;
+        if (rpc === 'update_personal_task_checked' && Object.keys(over).length) res = { ok: false, code: 'stale_conflict', message: JSON.stringify(over) } as RpcResult;
+        else { this.put({ id, ...patch }); res = { ok: true, data: { id, overwritten: {} } } as RpcResult; }
       }
       else if (rpc === 'delete_personal_task') this.put({ id, deleted_at: 'now' });
       else if (rpc === 'complete_personal_task') this.put({ id, status: 'done' });
@@ -78,26 +78,32 @@ describe('stale data after a rejected local op (the cursor-skip defect)', () => 
     await s.engine.pull('personal_tasks');
     expect(s.repo.list().find((t) => t.id === id)).toBeUndefined();
   });
-  it('converges to our edit (applied last) when the op is acknowledged', async () => {
+  it('an edit made from a stale value is REFUSED, nothing is overwritten, intent is kept, and a fresh op with a fresh base applies it', async () => {
     const s = setup(); const id = await seed(s);
     s.repo.update(id, { title: 'Mine' });
     s.srv.put({ id, title: 'Theirs' });
     await s.engine.pull('personal_tasks');
-    await s.engine.push(); await s.engine.pull('personal_tasks');
-    expect(title(s.repo, id)).toBe('Mine');
+    const rep = await s.engine.push();
+    expect(rep.rejected).toBe(1);
+    expect(s.srv.rows.get(id)!.title).toBe('Theirs');                       // never overwritten
+    expect(s.db.all<{ error_code: string }>("select error_code from outbox where state = 'rejected'")[0]!.error_code).toBe('stale_conflict');
+    await s.engine.pull('personal_tasks');
+    expect(title(s.repo, id)).toBe('Theirs');
+    s.repo.update(id, { title: 'Mine' });                                    // user chose "apply mine": fresh op, base = what they now see
+    await s.engine.push();
     expect(s.srv.rows.get(id)!.title).toBe('Mine');
   });
 });
 
 describe('conflict records', () => {
-  it('records a field conflict when both sides changed the same field, and marks it applied on ack', async () => {
+  it('records a field conflict when both sides changed the same field, and closes it when the server refuses the stale edit', async () => {
     const s = setup(); const id = await seed(s);
     s.repo.update(id, { title: 'Mine' }); s.srv.put({ id, title: 'Theirs' });
     await s.engine.pull('personal_tasks');
     expect(conflicts(s.db)).toHaveLength(1);
     expect(conflicts(s.db)[0]).toMatchObject({ kind: 'field', field: 'title', state: 'open' });
     await s.engine.push();
-    expect(conflicts(s.db)[0]).toMatchObject({ state: 'applied' });
+    expect(conflicts(s.db)[0]).toMatchObject({ state: 'moot' });
   });
   it('records no conflict for different fields, or when both set the same value', async () => {
     const s = setup(); const id = await seed(s);

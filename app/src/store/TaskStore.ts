@@ -5,6 +5,7 @@ export type InboxItem =
   | { kind: 'deleted_remotely'; key: string; id: number; title: string };
 export interface SyncView {
   phase: 'synced' | 'syncing' | 'waiting_retry' | 'offline' | 'auth_required' | 'attention';
+  blocked?: 'server_update_required' | null;
   queued: number; rejected: number; conflicts: number; nextRetryAt: number | null; lastSyncedAt: number | null;
 }
 export interface StoreState {
@@ -27,6 +28,7 @@ export interface TaskStore {
   retryNow?(): void;
   retryRejected?(seq: number): void;
   discardRejected?(seq: number): void;
+  keepMineAfterConflict?(seq: number): void;
   restoreOtherValue?(conflictId: number): void;
   dismissConflict?(conflictId: number): void;
   fullResync?(): void;

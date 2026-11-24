@@ -67,3 +67,8 @@ vitest all migrations:                           11 files, 126 passed, 0 failed
 vitest on baseline set:                          125 passed, 1 failed (the 0019 race test, expected: no 0019 there; the fallback test passes)
 ui_sync_e2e 4/4, ui_e2e 8/8, ui_shell_e2e 21/21 (fake backend)
 UI copy: rejected not_found now says 'deleted or no longer available to you' (does not reveal which). Retry countdown is shown only in waiting_retry.
+
+--- update: 0019 is now a conditional refusal (no silent overwrite, no unchecked fallback) ---
+run.py all migrations 0001-0019: 67/67. Baseline (0001-0013+0017): 49 passed, 18 failed (same 18 as above).
+vitest all migrations: 126/126. Baseline set: 118 passed, 8 failed: all 8 are edit-path tests that need 0019 (edits block without it by design).
+ui_sync_e2e 4/4. Mutation checks for 0019 and the new client paths: NOT yet run.

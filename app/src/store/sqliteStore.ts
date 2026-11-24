@@ -46,9 +46,9 @@ export function createSqliteStore(db: SqlDriver, rpc: RpcClient, opts: { autoSyn
       online, waiting: (c.queued ?? 0) + (c.inflight ?? 0), needAttention: (c.rejected ?? 0) + conflicts,
       inbox: inbox(),
       sync: {
-        phase: deriveSyncPhase({ online, syncing: running, authPaused: engine.status === 'paused_unauthorized', queued: c.queued ?? 0, inflight: c.inflight ?? 0,
+        phase: engine.blocked ? 'attention' : deriveSyncPhase({ online, syncing: running, authPaused: engine.status === 'paused_unauthorized', queued: c.queued ?? 0, inflight: c.inflight ?? 0,
           rejected: c.rejected ?? 0, openConflicts: conflicts, nextRetryAt: outbox.nextDueAt(), now: Date.now() }),
-        queued: (c.queued ?? 0) + (c.inflight ?? 0), rejected: c.rejected ?? 0, conflicts, nextRetryAt: outbox.nextDueAt(), lastSyncedAt,
+        blocked: engine.blocked, queued: (c.queued ?? 0) + (c.inflight ?? 0), rejected: c.rejected ?? 0, conflicts, nextRetryAt: outbox.nextDueAt(), lastSyncedAt,
       },
     };
   }
@@ -95,6 +95,17 @@ export function createSqliteStore(db: SqlDriver, rpc: RpcClient, opts: { autoSyn
     remove(id) { repo.remove(id); kick(); },
     retryNow() { engine.resumeAfterTokenRefresh(); db.run("update outbox set next_attempt_at = 0 where state = 'queued'"); void sync(); },
     retryRejected(seq) { if (outbox.retryRejected(seq)) kick(); },
+    /** "Apply mine anyway" after a stale_conflict: pull what the other device did, then queue a FRESH op whose base is that value. The server re-checks atomically. */
+    keepMineAfterConflict(seq) {
+      void (async () => {
+        const op = db.all<{ rpc: string; entity_id: string; args_json: string; error_code: string | null }>("select rpc, entity_id, args_json, error_code from outbox where seq = ? and state = 'rejected'", [seq])[0];
+        if (!op || op.error_code !== 'stale_conflict' || op.rpc !== 'update_personal_task_checked') return;
+        try { await engine.pull('personal_tasks'); } catch { return; }       // need the other value first; stay in the inbox if offline
+        const patch = (JSON.parse(op.args_json) as [string, Record<string, unknown>])[1];
+        db.transaction(() => { repo.update(op.entity_id, patch as never); outbox.discardRejected(seq); });
+        kick();
+      })();
+    },
     discardRejected(seq) { outbox.discardRejected(seq); emit(); },
     restoreOtherValue(cid) {
       const c = db.all<{ entity_id: string; field: string; server_value: string; state: string }>('select entity_id, field, server_value, state from sync_conflicts where id = ?', [cid])[0];

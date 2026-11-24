@@ -17,7 +17,7 @@ export function SyncPanel({ store, st, locale, now = Date.now() }: { store: Task
   return (
     <View style={[s.panel, { backgroundColor: th.surface, borderColor: th.border }]} testID="sync-panel" accessibilityLiveRegion="polite">
       <T variant="heading" weight={600}>{x.title}</T>
-      <T testID="sync-phase">{x.phase[sync.phase]}</T>
+      <T testID="sync-phase">{sync.blocked ? x.serverOutdated : x.phase[sync.phase]}</T>
       {sync.queued > 0 ? <T color={th.textMuted} testID="sync-queued">{x.queued(sync.queued)}</T> : null}
       {retryIn !== null ? <T color={th.textMuted}>{x.retryIn(retryIn)}</T> : null}
       <T color={th.textMuted} variant="caption">{last ? x.lastSynced(last) : x.never}</T>
@@ -31,8 +31,9 @@ export function SyncPanel({ store, st, locale, now = Date.now() }: { store: Task
           {it.kind === 'rejected' ? (<>
             <T>{x.rejected(it.title, x.why[it.code] ?? x.whyOther)}</T>
             <View style={s.row}>
-              {it.retryable ? <Button label={x.retry} kind="secondary" onPress={() => store.retryRejected?.(it.seq)} /> : null}
-              <Button label={x.discard} kind="secondary" onPress={() => store.discardRejected?.(it.seq)} />
+              {it.code === 'stale_conflict' ? <Button label={x.applyMine} onPress={() => store.keepMineAfterConflict?.(it.seq)} /> : null}
+              {it.retryable && it.code !== 'stale_conflict' ? <Button label={x.retry} kind="secondary" onPress={() => store.retryRejected?.(it.seq)} /> : null}
+              <Button label={it.code === 'stale_conflict' ? x.useTheirs : x.discard} kind="secondary" onPress={() => store.discardRejected?.(it.seq)} />
             </View></>) : null}
           {it.kind === 'conflict' ? (<>
             <T>{x.conflict(it.title, it.field, it.mine, it.theirs)}</T>

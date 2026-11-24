@@ -1,7 +1,8 @@
--- 0019: update with server-side conflict reporting. Same rules as update_personal_task (0013), plus p_base: the values the
--- client last saw for the fields it edits. Under the row lock the server reports which of those fields currently hold a
--- DIFFERENT value (data.overwritten = {field: value that was replaced}). The edit still applies (last writer wins); the client
--- uses the answer to tell the user. Closes the pull-then-push race of client-only detection. The replay result stores the same answer.
+-- 0019: conditional update. Same rules as update_personal_task (0013), plus p_base (REQUIRED): the values the client last saw
+-- for the fields it edits. Under the row lock, if ANY of those fields currently holds a different value (and not already the
+-- value being written) the server REFUSES with stale_conflict and changes nothing; the message carries the current values.
+-- The client keeps the user's intent, shows the conflict, and only a fresh operation with a fresh base can apply it.
+-- A refused op leaves no receipt, so a resend is evaluated again (the same answer while the values still differ).
 -- NOT part of the approved baseline: needs the user's approval before hosted use.
 create function app_api.update_personal_task_checked(p_op_id uuid, p_id uuid, p_patch jsonb, p_base jsonb)
 returns jsonb language plpgsql security definer
@@ -12,8 +13,8 @@ declare
 begin
   v_prev := app_private.begin_op(p_op_id, 'update_personal_task_checked', jsonb_build_object('i', p_id, 'p', p_patch, 'b', p_base));
   if v_prev is not null then return v_prev; end if;
-  if p_base is not null and jsonb_typeof(p_base) <> 'object' then
-    perform app_private.raise_tf('validation', 'base must be an object');
+  if p_base is null or jsonb_typeof(p_base) <> 'object' then
+    perform app_private.raise_tf('validation', 'base is required and must be an object');
   end if;
   if p_patch is null or jsonb_typeof(p_patch) <> 'object' or p_patch = '{}'::jsonb then
     perform app_private.raise_tf('validation', 'patch must be a non-empty object');
@@ -31,8 +32,8 @@ begin
   if p_patch ? 'status' and v_t.status = 'done' then
     perform app_private.raise_tf('validation', 'use reopen_personal_task for a done task');
   end if;
-  -- Server-side, atomic (row is locked): which edited fields did the client NOT see at their current value?
-  -- Only fields the client sent a base for are compared. The edit is still applied (last writer wins); the answer lets the client tell the user.
+  -- Atomic (row is locked): which edited fields hold a value the client did NOT see?
+  -- Only fields the client sent a base for are compared.
   v_cur := pg_catalog.to_jsonb(v_t);
   if p_base is not null then
     for k in select jsonb_object_keys(p_patch) loop
@@ -40,6 +41,9 @@ begin
         v_over := v_over || pg_catalog.jsonb_build_object(k, v_cur -> k);
       end if;
     end loop;
+  end if;
+  if v_over <> '{}'::jsonb then
+    perform app_private.raise_tf('stale_conflict', v_over::text);
   end if;
   update app.personal_tasks set
     title = case when p_patch ? 'title' then p_patch ->> 'title' else title end,
