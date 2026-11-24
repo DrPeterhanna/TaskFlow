@@ -230,7 +230,7 @@ begin
               and app_private.role_rank(p_role) < app_private.role_rank(v_actor.role))) then
     perform app_private.raise_tf('forbidden');
   end if;
-  v_code := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');   -- built-in CSPRNG uuids, at least 128 random bits
+  v_code := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');   -- see 0009 for the entropy statement
   insert into app.invitations (org_id, code_hash, role, unit_id, max_uses, expires_at, created_by)
   values (v_actor.org_id, pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(v_code, 'UTF8')), 'hex'),
           p_role, p_unit_id, p_max_uses, p_expires_at, v_actor.id)

@@ -359,8 +359,15 @@ def invitations_code_never_stored_plain_and_not_replayed(env: Env) -> None:
     dump = env.su("select (select string_agg(code_hash, ',') from app.invitations) || (select coalesce(string_agg(result::text, ','), '') from app.op_receipts) || (select string_agg(payload::text, ',') from app.events)")[0][0]
     assert code not in dump
     replay = env.rpc(f.admin, "create_invitation", "member", f.u1, 1, FUTURE, op=op)
-    assert "code" not in replay["data"] and replay["data"]["code_shown_once"] is True
+    # lost response: the retry rotates the code of the SAME unused invitation, no second invitation
+    assert replay["data"]["invitation_id"] == r["data"]["invitation_id"] and replay["data"]["code"] != code
     assert env.su("select count(*) from app.invitations")[0][0] == 5
+    u = env.user("late@a.test")
+    assert env.rpc(u, "redeem_invitation", code)["ok"] is False            # the lost code is dead
+    assert env.rpc(u, "redeem_invitation", replay["data"]["code"])["ok"] is True
+    after = env.rpc(f.admin, "create_invitation", "member", f.u1, 1, FUTURE, op=op)
+    assert "code" not in after["data"]                                     # used: nothing to recover
+
 
 
 # ---------------------------------------------------------------- idempotency receipts (offline foundation)
@@ -625,3 +632,36 @@ def regression_suspended_actor_has_no_authority_or_scope(env: Env) -> None:
     assert env.su("select app_private.has_authority_over_membership(%s,%s)", (f.mid["lead"], f.mid["mem"]))[0][0] is False
     assert env.su("select app_private.unit_in_scope(%s,%s)", (f.mid["lead"], f.u1a))[0][0] is False
     assert env.su("select app_private.has_authority_over_membership(%s,%s)", (f.mid["admin"], f.mid["mem"]))[0][0] is True
+
+
+@test
+def lifecycle_removed_member_rejoins_by_invitation_only_and_keeps_history(env: Env) -> None:
+    f = fixture(env)
+    env.rpc(f.admin, "set_member_status", f.mid["mem"], "removed")
+    n_events = env.su("select count(*) from app.events where actor_membership_id=%s", (f.mid["mem"],))[0][0]
+    # no back door: admin cannot reactivate directly, a removed user cannot redeem into a second org while live
+    expect_tf("validation", lambda: env.rpc(f.admin, "set_member_status", f.mid["mem"], "active"))
+    assert rows(env, f.mem, "select id from app.org_units") == []
+    # authorized invitation brings the same membership row back with the INVITATION's role and unit
+    inv = env.rpc(f.admin, "create_invitation", "team_leader", f.u2, 1, FUTURE)
+    r = env.rpc(f.mem, "redeem_invitation", inv["data"]["code"])
+    assert r["ok"] and r["data"]["membership_id"] == f.mid["mem"]
+    assert env.su("select role::text, status::text, unit_id::text from app.memberships where id=%s", (f.mid["mem"],))[0] == ("team_leader", "active", f.u2)
+    assert env.su("select count(*) from app.events where actor_membership_id=%s", (f.mid["mem"],))[0][0] > n_events   # history preserved, rejoin event added
+    assert "member.rejoined" in {x[0] for x in env.su("select kind from app.events")}
+    assert env.su("select count(*) from app.memberships where user_id=%s", (f.mem,))[0][0] == 1
+    # never two live memberships
+    expect_pg(("23505",), lambda: env.su("insert into app.memberships (org_id,user_id,role,unit_id) values (%s,%s,'member',%s)",
+              (str(env.su("select org_id from app.memberships where user_id=%s", (f.outsider,))[0][0]),
+               f.mem, str(env.su("select id from app.org_units where org_id<>%s limit 1", (f.org,))[0][0]))))
+    # removed in org A, invited to org B: allowed, A row stays as history
+    env.rpc(f.admin, "set_member_status", f.mid["lead2"], "removed")
+    oinv = env.rpc(f.outsider, "create_invitation", "member",
+                   str(env.su("select id from app.org_units where org_id<>%s limit 1", (f.org,))[0][0]), 1, FUTURE)
+    assert env.rpc(f.lead2, "redeem_invitation", oinv["data"]["code"])["ok"]
+    assert env.su("select count(*) from app.memberships where user_id=%s", (f.lead2,))[0][0] == 2
+    assert env.su("select count(*) from app.memberships where user_id=%s and status<>'removed'", (f.lead2,))[0][0] == 1
+    # a suspended member cannot redeem a second invitation to escape suspension
+    env.rpc(f.admin, "set_member_status", f.mid["lead"], "suspended")
+    inv2 = env.rpc(f.admin, "create_invitation", "member", f.u1, 1, FUTURE)
+    expect_tf("validation", lambda: env.rpc(f.lead, "redeem_invitation", inv2["data"]["code"]))
