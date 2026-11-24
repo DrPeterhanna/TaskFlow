@@ -39,3 +39,8 @@ KILLED  personal depth limit removed  <- personal_space_depth_gate_server_stamp_
 derive_code label dropped. Result: 3 killed, 0 survived (all by hmac_matches_rfc4231_and_python).
 The earlier 35 mutants (34 killed, 1 equivalent survivor) were last run on the 41-test suite before 0012;
 they were NOT re-run after 0012 (0012 only replaces derive_code and adds hmac_sha256; the added test cannot weaken the suite).
+
+== Full rerun on the final suite (42 tests, migrations 0001-0012) ==
+39 mutants reported (the placeholder no-op entry produces no result): 38 killed, 1 survived.
+Survivor: "suspended actor keeps authority" (status check in has_authority_over_membership). Equivalent: the same
+condition is enforced by unit_in_scope, so no observable behaviour changes. Local PostgreSQL 16.2 only.
