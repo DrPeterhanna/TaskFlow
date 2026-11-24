@@ -44,3 +44,9 @@ they were NOT re-run after 0012 (0012 only replaces derive_code and adds hmac_sh
 39 mutants reported (the placeholder no-op entry produces no result): 38 killed, 1 survived.
 Survivor: "suspended actor keeps authority" (status check in has_authority_over_membership). Equivalent: the same
 condition is enforced by unit_in_scope, so no observable behaviour changes. Local PostgreSQL 16.2 only.
+
+== Full rerun on exact final revision (migrations 0001-0013, 46 Postgres tests), run 2026-11-24 12:08-12:18 EET ==
+47 mutants reported (48 list entries; the placeholder no-op entry prints no result): 46 killed, 1 survived.
+Survivor: "suspended actor keeps authority" (status check in has_authority_over_membership). Equivalent mutant:
+unit_in_scope enforces the same condition, so behaviour is unchanged. Revision: f07886c plus this file. Local PostgreSQL 16.2 only.
+Note: the dependency-lock mutant survived the first 0013 run; a deterministic disjoint-row test now kills it.

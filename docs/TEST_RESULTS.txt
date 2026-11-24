@@ -45,5 +45,6 @@ PASS  hmac_matches_rfc4231_and_python
 PASS  personal_rpcs_update_reopen_delete_restore_reorder_are_owner_only_and_idempotent
 PASS  personal_dependencies_reject_cycles_and_foreign_tasks_and_concurrent_cycles
 PASS  personal_recurrence_and_notes_rpcs_owner_only
+PASS  personal_dependency_cycle_across_disjoint_rows_is_serialized_by_the_user_lock
 
-45 passed, 0 failed, 45 total
+46 passed, 0 failed, 46 total
