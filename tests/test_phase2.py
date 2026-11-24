@@ -902,10 +902,10 @@ def personal_dependencies_reject_cycles_and_foreign_tasks_and_concurrent_cycles(
         except Exception as e:   # noqa: BLE001
             out.append(str(e)[:60])
     th = [threading.Thread(target=go, args=(t[3], t[2])), threading.Thread(target=go, args=(t[2], t[3]))]
-    for x in th:
-        x.start()
-    for x in th:
-        x.join()
+    for th_i in th:
+        th_i.start()
+    for th_i in th:
+        th_i.join()
     assert out.count("ok") == 1, out
     n = env.su("select count(*) from app.personal_task_dependencies where blocked_by_task_id in (%s,%s) and task_id in (%s,%s)", (t[2], t[3], t[2], t[3]))[0][0]
     assert n == 1
