@@ -185,8 +185,10 @@ def lifecycle_user_without_org_deletes_cleanly_and_profiles_only_orphaned_when_a
     assert ptask(env, u, "x")["ok"]
     delete_user(env, u)
     assert env.su("select count(*) from app.personal_tasks where user_id=%s", (u,))[0][0] == 0
-    # invariant replacing the dropped profiles->auth.users foreign key: every profile without an auth user is anonymised
-    bad = env.su("select count(*) from app.profiles p where not exists (select 1 from auth.users a where a.id=p.id) and p.deleted_at is null")[0][0]
+    # referential guarantee kept: live link to Auth is a real FK; a profile without an Auth link is always anonymised
+    assert env.su("select count(*) from pg_constraint where conname='profiles_auth_user_fkey' and contype='f'")[0][0] == 1
+    assert env.su("select count(*) from pg_constraint where conname='profiles_id_fkey'")[0][0] == 0
+    bad = env.su("select count(*) from app.profiles p where p.auth_user_id is null and (p.deleted_at is null or p.display_name <> '')")[0][0]
     assert bad == 0
 
 
@@ -208,3 +210,37 @@ def lifecycle_personal_events_stay_append_only_outside_erasure(env: Env) -> None
     expect_pg(("42501",), lambda: env.su("delete from app.personal_events where user_id=%s", (f.mem,)))
     expect_pg(("42501",), lambda: env.su("update app.personal_events set kind='x' where user_id=%s", (f.mem,)))
     assert env.su("select count(*) from app.personal_events where user_id=%s", (f.mem,))[0][0] >= 1
+
+
+@test
+def lifecycle_guard_lock_serialises_deterministically(env: Env) -> None:
+    """A holds an open transaction that deleted admin 1; B deletes admin 2 meanwhile. B must WAIT on the guard lock, then be
+    refused by the dedicated guard (not merely by the later membership trigger). Forced interleaving, not timing luck."""
+    import time
+    f = fixture(env)
+    assert env.rpc(f.admin, "set_member_role", f.mid["sup"], "admin")["ok"]
+    a = env.conn()
+    ca = a.cursor()
+    ca.execute("delete from auth.users where id=%s", (f.admin,))      # uncommitted
+    res: list[Any] = []
+
+    def b() -> None:
+        c = env.conn()
+        try:
+            t0 = time.time()
+            with c.cursor() as cur:
+                cur.execute("delete from auth.users where id=%s", (f.sup,))
+            c.commit()
+            res.append(("deleted", time.time() - t0))
+        except Exception as e:  # noqa: BLE001
+            c.rollback()
+            res.append((str(e), time.time() - t0))
+
+    th = threading.Thread(target=b)
+    th.start()
+    time.sleep(1.5)
+    assert not res, "B must be blocked while A holds the admin lock"
+    a.commit()
+    th.join()
+    assert "last admin: transfer" in res[0][0], res
+    assert user_exists(env, f.sup)
