@@ -10,6 +10,7 @@ import harness  # noqa: E402
 import test_phase2  # noqa: E402,F401
 import test_lifecycle  # noqa: E402,F401
 import test_sync_server  # noqa: E402,F401
+import test_security_audit  # noqa: E402,F401
 
 
 def main() -> int:
