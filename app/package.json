@@ -1,0 +1,15 @@
+{
+  "name": "taskflow-app",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-sqlite --no-warnings ./node_modules/vitest/vitest.mjs run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.1"
+  }
+}
