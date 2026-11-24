@@ -1,3 +1,5 @@
+/usr/local/lib/python3.10/dist-packages/platformdirs/api.py:459: RuntimeDirWarning: XDG_RUNTIME_DIR is not set, falling back to /tmp/runtime-1000
+  return Path(self.user_runtime_dir)
 PASS  lint_rls_enabled_and_forced_on_every_table
 PASS  lint_functions_fixed_search_path_owner_and_no_public_execute
 PASS  lint_clients_have_no_write_privileges_and_anon_has_none
@@ -39,5 +41,6 @@ PASS  lifecycle_removed_member_rejoins_by_invitation_only_and_keeps_history
 PASS  personal_space_owner_only_even_admin_and_supervisor_cannot_read
 PASS  personal_space_depth_gate_server_stamp_and_cascade
 PASS  sync_pull_commit_safe_horizon_never_skips_late_commits
+PASS  hmac_matches_rfc4231_and_python
 
-41 passed, 0 failed, 41 total
+42 passed, 0 failed, 42 total

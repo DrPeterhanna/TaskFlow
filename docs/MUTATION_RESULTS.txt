@@ -33,3 +33,9 @@ KILLED  sync horizon ignored  <- sync_pull_commit_safe_horizon_never_skips_late_
 KILLED  personal data readable by all  <- personal_space_owner_only_even_admin_and_supervisor_cannot_read
 KILLED  personal completion gate removed  <- personal_space_depth_gate_server_stamp_and_cascade
 KILLED  personal depth limit removed  <- personal_space_depth_gate_server_stamp_and_cascade
+
+== Addendum after migration 0012 (standard HMAC) ==
+3 new mutants run against the 42-test suite: ipad constant wrong, long-key hashing replaced by truncation,
+derive_code label dropped. Result: 3 killed, 0 survived (all by hmac_matches_rfc4231_and_python).
+The earlier 35 mutants (34 killed, 1 equivalent survivor) were last run on the 41-test suite before 0012;
+they were NOT re-run after 0012 (0012 only replaces derive_code and adds hmac_sha256; the added test cannot weaken the suite).
