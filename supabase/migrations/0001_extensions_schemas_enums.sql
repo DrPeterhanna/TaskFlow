@@ -10,6 +10,8 @@ begin
   if not exists (select 1 from pg_roles where rolname = 'app_rpc') then
     create role app_rpc nologin;
   end if;
+  -- hosted Supabase: postgres is not superuser; it needs SET on app_rpc to own functions as app_rpc (found by hosted run)
+  execute format('grant app_rpc to %I with set true', current_user);
 end $$;
 
 revoke all on schema app, app_private, app_api from public;
