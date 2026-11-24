@@ -7,6 +7,8 @@ import { deriveSyncPhase } from '../sync/snapshot';
 import type { InboxItem, StoreState, TaskStore } from './TaskStore';
 
 /** Real store: UI reads only local SQLite; writes are optimistic + outbox; a sync loop pushes and pulls. */
+const CHECKED_RPCS = new Set(['update_personal_task_checked', 'complete_personal_task_checked', 'reopen_personal_task_checked', 'delete_personal_task_checked']);
+
 export function createSqliteStore(db: SqlDriver, rpc: RpcClient, opts: { autoSync?: boolean } = {}): TaskStore & { sync(): Promise<void>; connectivityRestored(): Promise<void>; engine: SyncEngine } {
   migrate(db);
   const outbox = new Outbox(db);
@@ -99,10 +101,17 @@ export function createSqliteStore(db: SqlDriver, rpc: RpcClient, opts: { autoSyn
     keepMineAfterConflict(seq) {
       void (async () => {
         const op = db.all<{ rpc: string; entity_id: string; args_json: string; error_code: string | null }>("select rpc, entity_id, args_json, error_code from outbox where seq = ? and state = 'rejected'", [seq])[0];
-        if (!op || op.error_code !== 'stale_conflict' || op.rpc !== 'update_personal_task_checked') return;
+        if (!op || op.error_code !== 'stale_conflict' || !CHECKED_RPCS.has(op.rpc)) return;
         try { await engine.pull('personal_tasks'); } catch { return; }       // need the other value first; stay in the inbox if offline
         const patch = (JSON.parse(op.args_json) as [string, Record<string, unknown>])[1];
-        db.transaction(() => { repo.update(op.entity_id, patch as never); outbox.discardRejected(seq); });
+        db.transaction(() => {
+          // a FRESH op, built from the state just pulled, so its base is what the user now sees; the server checks it again atomically
+          if (op.rpc === 'update_personal_task_checked') repo.update(op.entity_id, patch as never);
+          else if (op.rpc === 'complete_personal_task_checked') { if (repo.get(op.entity_id)?.status !== 'done') repo.complete(op.entity_id); }
+          else if (op.rpc === 'reopen_personal_task_checked') { if (repo.get(op.entity_id)?.status === 'done') repo.reopen(op.entity_id); }
+          else if (repo.get(op.entity_id)) repo.remove(op.entity_id);
+          outbox.discardRejected(seq);
+        });
         kick();
       })();
     },

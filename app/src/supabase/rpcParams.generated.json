@@ -15,6 +15,11 @@
   "p_op_id",
   "p_id"
  ],
+ "complete_personal_task_checked": [
+  "p_op_id",
+  "p_id",
+  "p_base"
+ ],
  "create_invitation": [
   "p_op_id",
   "p_role",
@@ -53,6 +58,11 @@
   "p_op_id",
   "p_id"
  ],
+ "delete_personal_task_checked": [
+  "p_op_id",
+  "p_id",
+  "p_base"
+ ],
  "grant_permission": [
   "p_op_id",
   "p_membership_id",
@@ -90,6 +100,11 @@
  "reopen_personal_task": [
   "p_op_id",
   "p_id"
+ ],
+ "reopen_personal_task_checked": [
+  "p_op_id",
+  "p_id",
+  "p_base"
  ],
  "reorder_personal_task": [
   "p_op_id",

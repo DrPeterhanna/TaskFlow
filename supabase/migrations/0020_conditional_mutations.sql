@@ -42,7 +42,7 @@ begin
   end if;
   update app.personal_tasks set status = 'done', completed_at = now() where id = p_id;
   perform app_private.emit_personal_event(v_uid, 'ptask.completed', p_id, '{}'::jsonb, p_op_id);
-  v_res := app_private.ok(jsonb_build_object('id', p_id));
+  v_res := app_private.ok(jsonb_build_object('id', p_id, 'rv_before', v_t.row_version, 'rv', v_t.row_version + 1));
   return app_private.finish_op(p_op_id, v_res);
 end $$;
 
@@ -67,7 +67,7 @@ begin
   end if;
   update app.personal_tasks set status = 'todo', completed_at = null where id = p_id;
   perform app_private.emit_personal_event(v_uid, 'ptask.reopened', p_id, '{}'::jsonb, p_op_id);
-  v_res := app_private.ok(jsonb_build_object('id', p_id));
+  v_res := app_private.ok(jsonb_build_object('id', p_id, 'rv_before', v_t.row_version, 'rv', v_t.row_version + 1));
   return app_private.finish_op(p_op_id, v_res);
 end $$;
 
@@ -104,7 +104,7 @@ begin
   update app.personal_tasks t set deleted_at = now() from sub where t.id = sub.id and t.deleted_at is null;
   get diagnostics v_n = row_count;
   perform app_private.emit_personal_event(v_uid, 'ptask.deleted', p_id, jsonb_build_object('rows', v_n), p_op_id);
-  v_res := app_private.ok(jsonb_build_object('id', p_id, 'rows', v_n));
+  v_res := app_private.ok(jsonb_build_object('id', p_id, 'rows', v_n, 'rv_before', v_t.row_version, 'rv', v_t.row_version + 1));
   return app_private.finish_op(p_op_id, v_res);
 end $$;
 

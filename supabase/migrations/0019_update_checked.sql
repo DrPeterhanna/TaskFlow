@@ -60,7 +60,7 @@ begin
   where id = p_id;
   perform app_private.emit_personal_event(v_uid, 'ptask.updated', p_id,
     jsonb_build_object('fields', (select jsonb_agg(x order by x) from jsonb_object_keys(p_patch) x)), p_op_id);
-  v_res := app_private.ok(jsonb_build_object('id', p_id, 'overwritten', v_over));
+  v_res := app_private.ok(jsonb_build_object('id', p_id, 'overwritten', v_over, 'rv_before', v_t.row_version, 'rv', v_t.row_version + 1));
   return app_private.finish_op(p_op_id, v_res);
 end $$;
 grant execute on function app_api.update_personal_task_checked(uuid, uuid, jsonb, jsonb) to authenticated;

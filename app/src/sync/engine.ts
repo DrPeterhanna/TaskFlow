@@ -8,6 +8,8 @@ export type SyncStatus = 'idle' | 'waiting' | 'paused_unauthorized';
 
 export interface PushReport { sent: number; acked: number; rejected: number; status: SyncStatus }
 
+const CHECKED = new Set(['update_personal_task_checked', 'complete_personal_task_checked', 'reopen_personal_task_checked', 'delete_personal_task_checked']);
+
 export class SyncEngine {
   status: SyncStatus = 'idle';
   /** Set when the server cannot process queued work (missing migration). Cleared by the next successful push. */
@@ -33,7 +35,7 @@ export class SyncEngine {
       try {
         const res = await this.rpc.call(op.rpc, JSON.parse(op.args_json) as unknown[], op.op_id);
         this.db.transaction(() => {
-          if (res.ok) { this.outbox.ack(op.seq); this.recordOverwrites(op, res); this.clearPending(op.entity_type, op.entity_id); }
+          if (res.ok) { this.outbox.ack(op.seq); this.recordOverwrites(op, res); this.advanceChain(op, res); this.clearPending(op.entity_type, op.entity_id); }
           else if (res.code === 'unsupported') {
             // The server lacks a function this op needs (migration not applied). NEVER fall back to a weaker unchecked call:
             // the op stays queued with its intent, same op_id, and the user is told the server needs updating.
@@ -41,7 +43,7 @@ export class SyncEngine {
             this.blocked = 'server_update_required';
           } else { this.rollbackRejected(this.outbox.reject(op.seq, res.code, res.message)); }
         });
-        if (res.ok) rep.acked++; else if (res.code === 'unsupported' && op.rpc === 'update_personal_task_checked') { rep.sent--; rep.status = 'waiting'; return rep; } else rep.rejected++;
+        if (res.ok) rep.acked++; else if (res.code === 'unsupported' && CHECKED.has(op.rpc)) { rep.sent--; rep.status = 'waiting'; return rep; } else rep.rejected++;
       } catch (e) {
         if (!(e instanceof TransportError)) throw e;
         if (e.kind === 'unauthorized') {
@@ -91,6 +93,31 @@ export class SyncEngine {
     if (more.length === 0) {
       this.db.run('update local_rows set pending = 0, base_json = null where stream = ? and id = ?', [entityType, entityId]);
       this.settle(entityType, entityId, 'acked');
+    }
+  }
+
+  /**
+   * Version chain. Each acknowledged op of this device reports the task's row_version before and after it. A delete queued behind it
+   * carries the version the user saw; this moves that base forward over the device's OWN ops only. If the version before our op is
+   * not the one we expected, somebody else changed the task in between: the queued delete's base is set to -1 so the server refuses it
+   * (terminal stale_conflict with the current values) instead of deleting an edit the user never saw.
+   */
+  private advanceChain(op: { rpc: string; entity_type: string; entity_id: string }, res: { data?: unknown }): void {
+    if (op.entity_type !== 'personal_tasks') return;
+    let before: number | undefined, after: number | undefined;
+    if (op.rpc === 'create_personal_task') { before = 0; after = 1; }
+    else { const d = res.data as { rv_before?: number; rv?: number; already?: boolean } | undefined; before = d?.rv_before; after = d?.rv; }
+    if (typeof before !== 'number' || typeof after !== 'number') return;
+    const row = this.db.all<{ data_json: string }>("select data_json from local_rows where stream = 'personal_tasks' and id = ?", [op.entity_id])[0];
+    if (row) {
+      const d = JSON.parse(row.data_json) as { row_version?: number };
+      if ((d.row_version ?? 0) === before && op.rpc !== 'create_personal_task') this.db.run("update local_rows set data_json = ? where stream = 'personal_tasks' and id = ?", [JSON.stringify({ ...d, row_version: after }), op.entity_id]);
+    }
+    const dels = this.db.all<{ seq: number; args_json: string }>("select seq, args_json from outbox where entity_type = 'personal_tasks' and entity_id = ? and rpc = 'delete_personal_task_checked' and state = 'queued'", [op.entity_id]);
+    for (const d of dels) {
+      const a = JSON.parse(d.args_json) as [string, { row_version: number; subtree?: unknown }];
+      a[1] = { ...a[1], row_version: a[1].row_version === before ? after : -1 };
+      this.db.run('update outbox set args_json = ? where seq = ?', [JSON.stringify(a), d.seq]);
     }
   }
 

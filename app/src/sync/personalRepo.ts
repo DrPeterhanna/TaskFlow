@@ -29,16 +29,19 @@ export class PersonalTaskRepo {
     this.db.transaction(() => {
       const row = this.get(id);
       if (!row) throw new Error('task not found locally');
+      const seen = row.status;                                        // the status the user saw; the server refuses if it is different there (0020)
       this.patch(id, { status: 'done' });
-      this.outbox.enqueue({ rpc: 'complete_personal_task', entityType: 'personal_tasks', entityId: id, args: [id] });
+      this.outbox.enqueue({ rpc: 'complete_personal_task_checked', entityType: 'personal_tasks', entityId: id, args: [id, { status: seen }] });
     });
   }
 
   reopen(id: string): void {
     this.db.transaction(() => {
-      if (!this.get(id)) throw new Error('task not found locally');
+      const row = this.get(id);
+      if (!row) throw new Error('task not found locally');
+      const seen = row.status;
       this.patch(id, { status: 'todo' });
-      this.outbox.enqueue({ rpc: 'reopen_personal_task', entityType: 'personal_tasks', entityId: id, args: [id] });
+      this.outbox.enqueue({ rpc: 'reopen_personal_task_checked', entityType: 'personal_tasks', entityId: id, args: [id, { status: seen }] });
     });
   }
 
@@ -64,11 +67,29 @@ export class PersonalTaskRepo {
     });
   }
 
+  /**
+   * Delete. The base is what this device saw: the task's server row_version (0 when the task was created on this device and
+   * is not on the server yet), and, when every live subtask is server-confirmed and nothing is pending below it, a fingerprint of
+   * the live subtree. The server refuses (terminal) if either changed, so a remote edit is never deleted unseen. Earlier queued
+   * ops of this device on the same task are accounted for by the engine, which advances this base as they are acknowledged.
+   */
   remove(id: string): void {
     this.db.transaction(() => {
       if (!this.get(id)) throw new Error('task not found locally');
+      const rows = this.db.all<{ id: string; data_json: string; pending: number; deleted: number; change_xid: string | null }>(
+        "select id, data_json, pending, deleted, change_xid from local_rows where stream = 'personal_tasks'");
+      const byParent = new Map<string, typeof rows>();
+      const me = rows.find((r) => r.id === id)!;
+      for (const r of rows) { const p = (JSON.parse(r.data_json) as { parent_id?: string | null }).parent_id; if (p && !r.deleted) byParent.set(p, [...(byParent.get(p) ?? []), r]); }
+      let n = 0, sum = 0, clean = true;
+      const walk = (pid: string): void => { for (const c of byParent.get(pid) ?? []) { const v = (JSON.parse(c.data_json) as { row_version?: number }).row_version; if (c.pending || c.change_xid === null || typeof v !== 'number') clean = false; else { n++; sum += v; } walk(c.id); } };
+      walk(id);
+      const rv = me.change_xid === null ? 0 : ((JSON.parse(me.data_json) as { row_version?: number }).row_version ?? -1);
+      const hasEarlierOps = this.db.all("select 1 as x from outbox where entity_type = 'personal_tasks' and entity_id = ? and state in ('queued','inflight')", [id]).length > 0;
+      const base: Record<string, unknown> = { row_version: rv };
+      if (clean && !hasEarlierOps) base.subtree = { n, sum };       // with earlier own ops the subtree check is skipped (documented limit)
       this.db.run("update local_rows set deleted = 1, pending = 1, base_json = case when change_xid is not null and base_json is null then data_json else base_json end where stream = 'personal_tasks' and id = ?", [id]);
-      this.outbox.enqueue({ rpc: 'delete_personal_task', entityType: 'personal_tasks', entityId: id, args: [id] });
+      this.outbox.enqueue({ rpc: 'delete_personal_task_checked', entityType: 'personal_tasks', entityId: id, args: [id, base] });
     });
   }
 
