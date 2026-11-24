@@ -106,7 +106,11 @@ def lint_clients_have_no_write_privileges_and_anon_has_none(env: Env) -> None:
                          "revoke_invitation", "redeem_invitation", "set_member_role", "move_member",
                          "set_member_status", "grant_permission", "revoke_permission", "update_profile", "current_epoch",
                          "create_personal_task", "complete_personal_task", "create_personal_note", "sync_pull",
-                         "rotate_invitation_code"}, callable_
+                         "rotate_invitation_code",
+                         "update_personal_task", "reopen_personal_task", "delete_personal_task", "restore_personal_task",
+                         "reorder_personal_task", "add_personal_dependency", "remove_personal_dependency",
+                         "set_personal_recurrence", "clear_personal_recurrence", "update_personal_note",
+                         "delete_personal_note"}, callable_
     priv = env.su("""select p.proname from pg_proc p join pg_namespace n on n.oid=p.pronamespace
         where n.nspname='app_private' and has_function_privilege('authenticated', p.oid, 'execute') order by 1""")
     assert {r[0] for r in priv} == {"my_membership_id", "is_active_member", "me_has_authority_over_membership",
@@ -832,3 +836,94 @@ def hmac_matches_rfc4231_and_python(env: Env) -> None:
     got = env.su("select app_private.derive_code(1, 'invite', %s::uuid, %s::uuid, null)", (u, op))[0][0]
     want = pyhmac.new(secret.encode(), f"invite|{u}|{op}|".encode(), hashlib.sha256).hexdigest()
     assert got == want
+
+
+@test
+def personal_rpcs_update_reopen_delete_restore_reorder_are_owner_only_and_idempotent(env: Env) -> None:
+    f = fixture(env)
+    a, b = uuid7(), uuid7()
+    env.rpc(f.mem, "create_personal_task", a, None, "A", None)
+    env.rpc(f.mem, "create_personal_task", b, a, "B", None)
+    op = new_op()
+    env.rpc(f.mem, "update_personal_task", a, {"title": "A2", "priority": "high", "due_date": "2026-12-01"}, op=op)
+    rv = rows(env, f.mem, f"select row_version from app.personal_tasks where id='{a}'")[0][0]
+    env.rpc(f.mem, "update_personal_task", a, {"title": "A2", "priority": "high", "due_date": "2026-12-01"}, op=op)   # replay
+    assert rows(env, f.mem, f"select row_version from app.personal_tasks where id='{a}'")[0][0] == rv
+    assert rows(env, f.mem, f"select title, priority from app.personal_tasks where id='{a}'")[0] == ("A2", "high")
+    expect_tf("validation", lambda: env.rpc(f.mem, "update_personal_task", a, {"completed_at": "2026-01-01"}))
+    expect_tf("validation", lambda: env.rpc(f.mem, "update_personal_task", a, {"status": "done"}))
+    expect_tf("validation", lambda: env.rpc(f.mem, "update_personal_task", a, {}))
+    for who in (f.admin, f.sup, f.lead, f.outsider):   # nobody else can touch another user's task
+        for fn, args in (("update_personal_task", (a, {"title": "x"})), ("delete_personal_task", (a,)),
+                         ("reorder_personal_task", (a, "b1")), ("reopen_personal_task", (a,))):
+            expect_tf("not_found", lambda who=who, fn=fn, args=args: env.rpc(who, fn, *args))
+    env.rpc(f.mem, "complete_personal_task", b)
+    env.rpc(f.mem, "reopen_personal_task", b)
+    assert rows(env, f.mem, f"select status, completed_at is null from app.personal_tasks where id='{b}'")[0] == ("todo", True)
+    expect_tf("validation", lambda: env.rpc(f.mem, "reopen_personal_task", b))
+    env.rpc(f.mem, "reorder_personal_task", b, "a5")
+    expect_tf("validation", lambda: env.rpc(f.mem, "reorder_personal_task", b, "bad key!"))
+    r = env.rpc(f.mem, "delete_personal_task", a)
+    assert r["data"]["rows"] == 2
+    assert rows(env, f.mem, "select count(*) from app.personal_tasks where deleted_at is not null")[0][0] == 2
+    expect_tf("not_found", lambda: env.rpc(f.mem, "update_personal_task", a, {"title": "z"}))
+    expect_tf("validation", lambda: env.rpc(f.mem, "restore_personal_task", b))   # parent still deleted
+    r = env.rpc(f.mem, "restore_personal_task", a)
+    assert r["data"]["rows"] == 2
+    assert rows(env, f.mem, "select count(*) from app.personal_tasks where deleted_at is not null")[0][0] == 0
+    kinds = [x[0] for x in rows(env, f.mem, "select kind from app.personal_events order by id")]
+    assert "ptask.updated" in kinds and "ptask.deleted" in kinds and "ptask.restored" in kinds and "ptask.reopened" in kinds
+    assert env.su("select app_private.verify_chain(user_id) from app.personal_events limit 1")[0][0] is None
+    assert env.su("select count(*) from app.events where kind like 'ptask.%'")[0][0] == 0
+
+
+@test
+def personal_dependencies_reject_cycles_and_foreign_tasks_and_concurrent_cycles(env: Env) -> None:
+    import threading
+
+    f = fixture(env)
+    t = [uuid7() for _ in range(4)]
+    for i, x in enumerate(t):
+        env.rpc(f.mem, "create_personal_task", x, None, f"T{i}", None)
+    env.rpc(f.mem, "add_personal_dependency", t[0], t[1])
+    env.rpc(f.mem, "add_personal_dependency", t[1], t[2])
+    expect_tf("cycle_detected", lambda: env.rpc(f.mem, "add_personal_dependency", t[2], t[0]))
+    expect_tf("validation", lambda: env.rpc(f.mem, "add_personal_dependency", t[0], t[0]))
+    expect_tf("not_found", lambda: env.rpc(f.lead, "add_personal_dependency", t[0], t[3]))
+    env.rpc(f.mem, "remove_personal_dependency", t[1], t[2])
+    env.rpc(f.mem, "add_personal_dependency", t[2], t[0])   # now legal
+    env.rpc(f.mem, "remove_personal_dependency", t[2], t[0])
+    # opposing concurrent adds must not both succeed
+    out: list[str] = []
+    def go(a: str, b: str) -> None:
+        try:
+            env.rpc(f.mem, "add_personal_dependency", a, b)
+            out.append("ok")
+        except Exception as e:   # noqa: BLE001
+            out.append(str(e)[:60])
+    th = [threading.Thread(target=go, args=(t[3], t[2])), threading.Thread(target=go, args=(t[2], t[3]))]
+    [x.start() for x in th]; [x.join() for x in th]
+    assert out.count("ok") == 1, out
+    n = env.su("select count(*) from app.personal_task_dependencies where blocked_by_task_id in (%s,%s) and task_id in (%s,%s)", (t[2], t[3], t[2], t[3]))[0][0]
+    assert n == 1
+
+
+@test
+def personal_recurrence_and_notes_rpcs_owner_only(env: Env) -> None:
+    f = fixture(env)
+    rid, n = uuid7(), uuid7()
+    env.rpc(f.mem, "set_personal_recurrence", rid, {"title": "Weekly review"}, [6, 0], "2026-12-05", None, casts="")
+    expect_tf("validation", lambda: env.rpc(f.mem, "set_personal_recurrence", uuid7(), {"x": 1}, [1], "2026-12-05", None))
+    expect_tf("validation", lambda: env.rpc(f.mem, "set_personal_recurrence", uuid7(), {"title": "t"}, [1], "2026-12-05", "2026-12-01"))
+    expect_tf("not_found", lambda: env.rpc(f.lead, "set_personal_recurrence", rid, {"title": "hijack"}, [1], "2026-12-05", None))
+    expect_tf("not_found", lambda: env.rpc(f.lead, "clear_personal_recurrence", rid))
+    env.rpc(f.mem, "clear_personal_recurrence", rid)
+    assert rows(env, f.mem, f"select active from app.personal_recurrence_rules where id='{rid}'")[0][0] is False
+    env.rpc(f.mem, "create_personal_note", n, "first")
+    env.rpc(f.mem, "update_personal_note", n, "second", True)
+    assert rows(env, f.mem, f"select body, pinned from app.personal_notes where id='{n}'")[0] == ("second", True)
+    expect_tf("not_found", lambda: env.rpc(f.admin, "update_personal_note", n, "admin edit", None))
+    expect_tf("not_found", lambda: env.rpc(f.admin, "delete_personal_note", n))
+    env.rpc(f.mem, "delete_personal_note", n)
+    expect_tf("not_found", lambda: env.rpc(f.mem, "update_personal_note", n, "again", None))
+    assert env.su("select count(*) from app.events where payload::text like '%second%' or payload::text like '%Weekly%'")[0][0] == 0
