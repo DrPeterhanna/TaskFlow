@@ -39,3 +39,7 @@ See docs/TEST_RESULTS.txt for counts. Scenarios: offline write and flush; restar
 
 ## Needs real Supabase or a device (cannot be done locally)
 Hosted RLS and role behaviour, PostgREST error mapping for 0017/0019, JWT expiry, hosted migration application, expo-sqlite durability, OS background kill, connectivity events. No credentials are requested now.
+
+## Session token storage and credential history (updated)
+- Session tokens now use expo-secure-store (Keychain/Keystore) through a chunking adapter (app/src/supabase/secureStorage.ts). Adapter tests (4) cover large values, shrink, torn write reads as signed out, corruption. Verified against an in-memory backend only. Real Keychain/Keystore behaviour, backup exclusion and migration of old AsyncStorage sessions: device scope, unverified.
+- Correction: the database credential saved in the vault WAS used earlier for the authorised production migrations 0001-0013 (about 12:30, before the hold). It is held now and not used further. Earlier notes calling it unused were wrong.
