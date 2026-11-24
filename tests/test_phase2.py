@@ -930,3 +930,36 @@ def personal_recurrence_and_notes_rpcs_owner_only(env: Env) -> None:
     env.rpc(f.mem, "delete_personal_note", n)
     expect_tf("not_found", lambda: env.rpc(f.mem, "update_personal_note", n, "again", None))
     assert env.su("select count(*) from app.events where payload::text like '%second%' or payload::text like '%Weekly%'")[0][0] == 0
+
+
+@test
+def personal_dependency_cycle_across_disjoint_rows_is_serialized_by_the_user_lock(env: Env) -> None:
+    """Cycle t0->t1->t2->t3->t0 needs two concurrent inserts on DISJOINT task rows, so row locks cannot stop it."""
+    import threading
+    import time
+
+    f = fixture(env)
+    t = [uuid7() for _ in range(4)]
+    for i, x in enumerate(t):
+        env.rpc(f.mem, "create_personal_task", x, None, f"T{i}", None)
+    env.rpc(f.mem, "add_personal_dependency", t[1], t[2])
+    env.rpc(f.mem, "add_personal_dependency", t[3], t[0])
+    c = env.conn(f.mem)
+    cur = c.cursor()
+    cur.execute("select app_api.add_personal_dependency(%s, %s, %s)", (new_op(), t[0], t[1]))   # open transaction, uncommitted
+    result: list[str] = []
+
+    def other() -> None:
+        try:
+            env.rpc(f.mem, "add_personal_dependency", t[2], t[3])
+            result.append("ok")
+        except Exception as e:   # noqa: BLE001
+            result.append(getattr(e, "code", repr(e)))
+
+    th = threading.Thread(target=other)
+    th.start()
+    time.sleep(1.0)
+    assert th.is_alive() and not result, "second add must wait for the first transaction"
+    c.commit()
+    th.join(20)
+    assert result == ["cycle_detected"], result
