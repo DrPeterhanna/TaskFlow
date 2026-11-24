@@ -5,7 +5,7 @@ import threading
 from typing import Any
 
 from harness import Env, expect_pg, expect_tf, new_op, test
-from test_phase2 import fixture, join, FUTURE
+from test_phase2 import fixture, join, FUTURE, rows
 
 
 def ptask(env: Env, uid: str, title: str) -> dict[str, Any]:
@@ -272,3 +272,18 @@ def my_membership_verified_flag_and_closed_org(env: Env) -> None:
     assert env.as_user(u, "select app_api.my_membership()")[0][0]["data"]["membership"]["org_name"] == "Solo"
     assert env.rpc(u, "close_organization")["ok"]
     assert env.as_user(u, "select app_api.my_membership()")[0][0]["data"]["membership"] is None
+
+
+@test
+def suspended_or_removed_actor_has_no_authority_at_any_layer(env: Env) -> None:
+    """Helper-level contract plus end-to-end: a suspended supervisor can neither see nor act on subordinates."""
+    f = fixture(env)
+    q = "select app_private.has_authority_over_membership(%s, %s), app_private.unit_in_scope(%s, %s)"
+    assert env.su(q, (f.mid["sup"], f.mid["mem"], f.mid["sup"], f.u1a))[0] == (True, True)      # control: active supervisor
+    assert env.rpc(f.admin, "set_member_status", f.mid["sup"], "suspended")["ok"]
+    assert env.su(q, (f.mid["sup"], f.mid["mem"], f.mid["sup"], f.u1a))[0] == (False, False)
+    assert {str(r[0]) for r in rows(env, f.sup, "select id from app.memberships")} == {f.mid["sup"]}
+    expect_tf("forbidden", lambda: env.rpc(f.sup, "create_invitation", "member", f.u1a, 1, FUTURE))
+    expect_tf("forbidden", lambda: env.rpc(f.sup, "set_member_status", f.mid["mem"], "suspended"))
+    assert env.rpc(f.admin, "set_member_status", f.mid["sup"], "removed")["ok"]
+    assert env.su(q, (f.mid["sup"], f.mid["mem"], f.mid["sup"], f.u1a))[0] == (False, False)
