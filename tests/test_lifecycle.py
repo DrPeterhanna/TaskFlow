@@ -311,6 +311,8 @@ def admin_of_closed_org_may_be_deleted_and_soft_deleted_profile_cannot_authentic
     delete_user(env, f.admin)                       # sole-admin exemption applies to a closed org
     assert not user_exists(env, f.admin)
     # defence in depth: a profile marked deleted while its Auth link is still set cannot authenticate
+    assert ptask(env, f.lead, "visible while live")["ok"]
+    assert len(rows(env, f.lead, "select id from app.personal_tasks")) == 1
     env.su("update app.profiles set deleted_at = now() where id=%s", (f.lead,))
     expect_tf("unauthenticated", lambda: env.rpc(f.lead, "update_profile", {"theme": "dark"}))
     assert rows(env, f.lead, "select id from app.personal_tasks") == []
