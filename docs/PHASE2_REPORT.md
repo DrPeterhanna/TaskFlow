@@ -1,41 +1,49 @@
-# Phase 2 report: database, authentication, permissions, hierarchy, offline and audit foundations
+# Phase 2 report, revision 2: database, authentication, permissions, hierarchy, offline and audit foundations
 
-Scope: as approved by Peter on 24 Nov 2026. No paid services, no deployment, no mobile app code, no old codebase used.
-Repository: /downloads/taskflow (new git repository).
+Status: **schema foundation plus the listed RPCs, verified on local PostgreSQL 16.2 only.** This is not feature completion and not Supabase verification. Nothing deployed, no paid service, old codebase untouched. Repository: new git repo `taskflow` (11 migrations, 41 tests).
 
 ## 1. What was built
-- Schemas: `app` (tables, not exposed), `app_private` (helpers, not exposed), `app_api` (only RPC surface).
-- Profiles bound to `auth.users` through a trigger.
-- Organizations, org-unit tree with a closure table, cycle guard under an org-structure advisory lock.
-- Memberships (4 roles, status active/suspended/removed), delegated grants (scoped, expiring, revocable), invitations (hashed code, single or multi use, expiry, revocation, 5 failed tries per hour).
-- Last-admin protection (deferred constraint plus per-org advisory lock).
-- Authorization helpers: authority flows down only, strict rank rule, admin org-wide, grants never exceed own scope.
-- RLS enabled and FORCED on every table. Clients have SELECT only; every write is an RPC. `code_hash` is not readable.
-- 14 RPCs with typed errors (TFnnn): create_organization, create_unit, rename_unit, move_unit, create_invitation, revoke_invitation, redeem_invitation, set_member_role, move_member, set_member_status (suspend, reactivate, remove), grant_permission, revoke_permission, update_profile, plus current_epoch.
-- Offline foundations: sync columns (row_version, change_xid xid8, soft delete) on every syncable table; idempotency receipts written atomically with each mutation (replay, op_id_reuse on mismatch, op_expired from the v7 timestamp before any lookup, concurrent retries serialized); access epochs (user and unit scope) bumped by membership, grant and unit-structure changes.
-- Audit foundation: append-only per-org hash-chained `events`, written only by `emit_event` inside every RPC; `verify_chain`. Tamper evidence only (a privileged operator can recompute the chain; not tamper-proof).
+- Schemas `app` (tables), `app_private` (helpers), `app_api` (only RPC surface). Typed errors TFnnn.
+- Auth: profiles bound to `auth.users` by trigger; verified email required to create or join an org.
+- Org tree: organizations, units, closure table, cycle guard under an org-structure advisory lock (also in the trigger).
+- Memberships (member, team_leader, supervisor, admin; active, suspended, removed), delegated grants (scoped, expiring, revocable, never above own scope), invitations, last-admin protection (deferred trigger plus per-org lock).
+- RLS enabled and forced on every table. Clients have SELECT only; every write is an RPC. Code hashes and server secrets are unreadable by clients.
+- Offline foundations: sync columns (row_version, change_xid, soft delete) on syncable tables; idempotency receipts (atomic with the mutation, replay, op_id_reuse, op_expired from the v7 timestamp before lookup, concurrent retries serialized); access epochs (user and unit scope); `sync_floor` table; `sync_pull` (xid horizon, (change_xid, id) keyset, SECURITY INVOKER so RLS applies).
+- Audit foundations: append-only per-org hash-chained `events` written by `emit_event` in every RPC; `verify_chain`. Tamper evidence only against non-privileged modification. A privileged operator can recompute the chain. Not tamper-proof.
+- Personal space (schema foundation): personal_tasks (3 levels, server-stamped completion), personal_task_dependencies, personal_recurrence_rules, personal_attachments (metadata), personal_notes, personal_events (owner-only, own hash chain, never in org events). Owner-only RLS (no manager or admin policy).
 
-## 2. Files
-supabase/migrations/0001..0008 (below), tests/harness.py, tests/run.py, tests/test_phase2.py (35 tests), tests/support/00_supabase_shim.sql (TEST ONLY), scripts/mutate.py, pyproject.toml, README.md, .gitignore.
+## 2. RPCs (all idempotent, all audited)
+Org: create_organization, create_unit, rename_unit, move_unit, create_invitation, revoke_invitation, redeem_invitation, rotate_invitation_code, set_member_role, move_member, set_member_status, grant_permission, revoke_permission, update_profile, current_epoch.
+Personal: create_personal_task, complete_personal_task, create_personal_note. Sync: sync_pull (streams personal_tasks, personal_notes, org_units).
 
-## 3. Database migrations
-0001 schemas, roles, enums, typed errors, sync trigger. 0002 profiles. 0003 organizations, units, closure. 0004 memberships, grants, invitations, last-admin. 0005 authorization helpers. 0006 events and hash chain. 0007 receipts and epochs. 0008 RLS policies and RPCs.
-Ordering differs from the proposal's list (events, receipts and epochs were pulled forward from later numbers so audit capture and offline machinery exist before feature tables, as the roadmap requires). Tasks, dependencies, recurrence, follow-ups, personal tables, attachments, proposals and notifications are not built; they belong to later phases.
+## 3. Scope correction (explicit, not silent)
+The roadmap puts "personal tables with owner-only history" in Phase 2. Delivered: the tables, owner-only RLS, owner-only history chain, and the three RPCs above (the minimum to prove the history and gate paths). **Not delivered, and why:**
+- `my_day_items`: references team tasks, which do not exist until Phase 4. My Day UI and semantics are Phase 8. Prerequisites: team `tasks` table (Phase 4), the per-item register RPCs (add, remove, focus, move) from the approved sync design, a visibility check against task RLS.
+- Personal RPCs for update, delete/restore, dependency add/remove (with cycle check), recurrence set, reorder, attachment upload: tables exist, RPCs and tests do not. They belong with the task machinery (Phase 4) and attachments (Phase 11) so the personal and team paths share trigger functions.
+- Team tasks, dependencies, recurrence, follow-ups, notifications, attachments, proposals: Phases 4 to 11.
+- sync_pull covers three streams only. `sync_floor` has no purge job. Reconcile mode (`list_visible_ids`) and `full_resync_required` logic are not built (Phase 3 spike and Phase 5).
+- Roadmap exit criterion "Schema on staging" is NOT met (no staging; needs Peter's Supabase account). "Commit-skip test green" is met on local PostgreSQL only.
 
-## 4. Tests actually executed (local PostgreSQL 16.2 via pgserver, NOT Supabase)
-- Full suite: 35 tests, 35 passed (command: `python tests/run.py`). Categories: schema lint (RLS forced everywhere, fixed search_path, owner, no PUBLIC/anon execute, no client write grants, exact client-callable function list), authentication, RLS authorization matrix (member, leader, peer leader, supervisor, admin, other-org admin, anonymous), RPC positive and negative tests, hierarchy and cycle tests, invitations, receipts (replay, mismatch, expiry, concurrent), events (append-only, tamper detection, fork rejection), epochs, concurrency (opposing moves, concurrent receipts, admin lock), regression.
-- Mutation testing (the last 8 mutants were last run against the suite before its final 3 tests were added; the first 19 were re-run on the final suite): 27 mutants of critical rules were applied one at a time. 26 killed by the suite; 1 survived (suspended-actor status check inside has_authority_over_membership). It is an equivalent mutant: `unit_in_scope` re-checks the actor status, and a test confirms a suspended actor has no authority. Several mutants first survived and led to new tests (peer same-rank, deterministic admin lock, receipt overwrite, scope).
-- ruff: pass. mypy: pass (tests and scripts). Build verification: all 8 migrations apply in order to an empty database (done by the harness for every run).
-- Not run: sqlfluff over the SQL (file too large for the default limit; only a whitespace rule was tried on small files). No API integration tests through PostgREST/Supabase, no offline client tests (no client exists), no physical-device tests, no performance tests.
+## 4. Migrations
+0001 schemas, roles, enums, errors. 0002 profiles. 0003 org tree and closure. 0004 memberships, grants, invitations, last-admin. 0005 authz helpers. 0006 events and chain. 0007 receipts and epochs. 0008 RLS and RPCs. 0009 rejoin lifecycle. 0010 personal space, sync_floor, sync_pull. 0011 stable invitation replay and rotation.
+Numbering differs from the proposal: events, receipts and epochs were pulled forward. 0009 and 0011 are fix-forward (pre-release), they supersede functions from 0008.
 
-## 5. Known limitations and open items
-- Local PostgreSQL is not Supabase. Not verified: the `auth` schema grants to `app_rpc`, ownership changes by the hosted `postgres` role, RLS through PostgREST, `auth.uid()` from a real JWT, Auth email verification, secret management. `pgcrypto` was unavailable locally so invitation codes use built-in random UUIDs (at least 128 random bits).
-- Single org per user and `UNIQUE(user_id)` (default): a removed member cannot rejoin; reactivation of removed members is blocked.
-- Defaults I chose that need Peter's confirmation: unit names visible to all active org members; a leader sees only members below their rank in their unit subtree (peer visibility stays N); `admin` cannot be created by invitation (use set_member_role); invalid invitation codes return `{ok:false,error:not_found}` (not an exception) so failed attempts persist for the rate limit; invitation code is returned once and is not replayed from the receipt; default locale 'en'.
-- Events table is not partitioned and per-org serialization is untested at scale. Daily signed chain-head export is not built (still an open decision).
-- Receipt purge job and tombstone/sync_floor are not built (Phase 5). Epoch cost at scale is not measured.
-- Org events contain no task kinds yet. Personal-space tables are not built.
-- Open decisions still open from the proposal are unchanged (legacy requirements, working days and capacity, on-time metric, MFA and DB encryption, legal region, languages, store and Supabase accounts).
+## 5. Decisions made in this revision
+- **Rejoin.** At most one live (non-removed) membership per user (partial unique index). A removed member keeps their row and history. A valid invitation to the same org reactivates that same row with the invitation's role and unit (event member.rejoined). An invitation from another org creates a new row; the old row stays as history. Suspended members cannot redeem. Admins cannot resurrect removed members directly.
+- **Invitation codes and retries.** Codes are derived, not stored: `code = SHA-256(secret || label || user || op [|| invitation])`. Only the hash is stored, so a leak of invitations, receipts or events does not reveal codes. The same op returns the same code, whether the retry is delayed or concurrent, while the invitation is live and the creator is still an active member. A used-up, revoked or expired invitation returns no code. Rotation is a separate authorized RPC (creator or admin) with its own stable replay. Redeem retry with the same op replays the stored result and cannot consume a second use.
+  Tradeoff: a party holding the server secret and the (user_id, op_id) pair can re-derive a code (the secret is readable only by the RPC owner role). The construction is a secret-prefixed SHA-256 because pgcrypto is unavailable locally; on Supabase it should become `extensions.hmac` after verification there. Code entropy is bounded by the 244-bit secret (two v4 UUIDs: 2 x 122 random bits).
+- Invalid invitation codes return `{ok:false, error:not_found}` (not an exception) so failed attempts are committed and counted (5 per hour).
+- Defaults to confirm with Peter: unit names visible to all org members; leaders see only lower-rank members in their subtree (peer visibility N); admins are not created by invitation; default locale 'en'.
 
-## 6. Next phase dependencies
-Phase 3 (design system and app foundation) needs: confirmation of locale default and the Phase 2 defaults above, Expo/React Native toolchain choice per the approved proposal, and Supabase project ownership before any hosted verification (needs Peter's accounts; nothing created). Task tables (Phase 4) build on the lock, receipt, event and epoch helpers here.
+## 6. Tests actually executed (local PostgreSQL 16.2 via pgserver; NOT Supabase)
+- `python tests/run.py`: **41 of 41 passed** (docs/TEST_RESULTS.txt). Covers: schema lint (RLS forced, fixed search_path, owner, no PUBLIC or client write grants, exact client-callable function list); authentication; RLS matrix across member, leader, peer leader, supervisor, admin, other-org admin, anonymous, suspended, removed; RPC allow and deny; hierarchy and cycles; rejoin lifecycle; invitations (single use, expiry, revocation, rate limit, stable replay, concurrent and delayed duplicates, rotation); receipts (replay, mismatch, expired id, concurrent retry); event tamper detection and fork rejection; epochs; concurrency (opposing moves, admin lock, receipts, invitations); personal-space owner-only and gate and depth; sync_pull late-commit and pagination; regression.
+- Mutation testing on the final suite: **35 mutants applied one at a time, 34 killed, 1 survived** (docs/MUTATION_RESULTS.txt). The survivor is an equivalent mutant: removing the actor-status check inside `has_authority_over_membership` changes nothing because `unit_in_scope` re-checks status; a regression test asserts the observable result. Killed mutants include: cycle guard, structure lock, RLS force, last-admin, admin lock, rank strictness, scope check, grant expiry and revocation, events immutability, chain fork, hash payload, args mismatch, op expiry, receipt overwrite, epoch bump, invitation scope, rate limit, hash and secret exposure, rotation authorization, rejoin role, multiple live memberships, sync horizon, personal owner policy, personal gate and depth.
+- ruff: pass. mypy: pass. sqlfluff (postgres dialect, `.sqlfluff`, no file-size skip, layout and capitalization rules): pass on all 11 migrations. Limit: PL/pgSQL bodies are strings to sqlfluff, so they are not style-checked, and the safety rules are enforced by the lint tests instead.
+- Build verification: all 11 migrations apply in order on an empty database (done by the harness in every run).
+- NOT run: API tests through PostgREST or Supabase, RLS under real JWTs, hosted Supabase checks (auth schema grants, role ownership), mobile or offline client tests (no client yet), chaos or load tests, physical-device tests.
+
+## 7. Known limitations
+Local PostgreSQL is not Supabase. Epoch cost and per-org event serialization are unmeasured at scale. Events are not partitioned. No signed chain-head export. Receipt purge job and tombstone purge not built. Org events carry no task kinds yet. Open decisions from the proposal are unchanged.
+
+## 8. Next phase dependencies
+Phase 3 stays paused. Before it: Peter's go-ahead on this scope correction and the defaults in section 5; Supabase project ownership (needs his accounts) for hosted verification; toolchain confirmation. Phase 4 builds task tables on the locks, receipts, events, epochs and sync_pull here, and then closes the personal RPC and My Day gaps.

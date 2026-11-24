@@ -1,0 +1,35 @@
+KILLED  cycle guard removed  <- hierarchy_cycle_rejected_via_rpc_and_trigger_backstop
+KILLED  structure lock made a no-op  <- concurrency_opposing_unit_moves_cannot_create_a_cycle
+KILLED  RLS not forced on memberships group  <- lint_rls_enabled_and_forced_on_every_table
+KILLED  last admin check removed  <- rpc_last_admin_cannot_be_demoted_removed_or_suspended
+KILLED  admin lock removed (update path)  <- concurrency_admin_changes_serialize_on_org_admin_lock
+KILLED  rank strictness weakened  <- rls_same_rank_peers_in_one_unit_are_not_in_authority
+KILLED  scope check removed from unit_in_scope  <- rls_membership_visibility_follows_authority_down_only
+KILLED  grant expiry ignored  <- rpc_delegated_grants_scope_expiry_revocation
+KILLED  grant revocation ignored  <- rpc_delegated_grants_scope_expiry_revocation
+SURVIVED  suspended actor keeps authority
+KILLED  events update/delete trigger removed  <- events_are_append_only_and_chain_detects_tampering
+KILLED  chain fork constraint removed  <- events_are_append_only_and_chain_detects_tampering
+KILLED  payload excluded from hash  <- events_are_append_only_and_chain_detects_tampering
+KILLED  args hash mismatch ignored  <- receipts_argument_mismatch_and_cross_rpc_reuse_rejected
+KILLED  op expiry check removed  <- receipts_expired_op_ids_never_replay_and_rejection_stores_nothing
+KILLED  receipt overwritten on conflict  <- invitations_code_never_stored_plain_and_not_replayed
+KILLED  epoch bump skips ancestors  <- epochs_bump_on_grant_role_move_and_unit_move_and_never_decrease
+KILLED  membership epoch trigger removed  <- epochs_bump_on_grant_role_move_and_unit_move_and_never_decrease
+KILLED  supervisor invitation scope removed  <- rpc_forbidden_matrix_without_grants
+KILLED  role escalation by grant holder  <- rpc_role_changes_respect_rank_and_scope
+KILLED  anyone may grant permissions  <- rpc_forbidden_matrix_without_grants
+KILLED  invitation rate limit removed  <- invitations_single_use_expiry_revocation_and_rate_limit
+KILLED  invitation list visible to everyone  <- rls_invitation_hash_and_internal_tables_unreadable
+KILLED  org_units readable across orgs  <- rls_profiles_org_data_events_follow_scope
+KILLED  code_hash readable by clients  <- rls_invitation_hash_and_internal_tables_unreadable
+KILLED  removed members reactivatable  <- rls_suspended_and_removed_members_lose_access
+KILLED  multiple live memberships allowed  <- lifecycle_removed_member_rejoins_by_invitation_only_and_keeps_history
+KILLED  replay returns code for a used-up invitation  <- invitations_code_never_stored_plain_and_not_replayed
+KILLED  secret readable by clients  <- invitations_code_never_stored_plain_and_not_replayed
+KILLED  anyone may rotate an invitation code  <- invitations_rotation_is_explicit_authorized_and_stable
+KILLED  rejoin keeps old role  <- lifecycle_removed_member_rejoins_by_invitation_only_and_keeps_history
+KILLED  sync horizon ignored  <- sync_pull_commit_safe_horizon_never_skips_late_commits
+KILLED  personal data readable by all  <- personal_space_owner_only_even_admin_and_supervisor_cannot_read
+KILLED  personal completion gate removed  <- personal_space_depth_gate_server_stamp_and_cascade
+KILLED  personal depth limit removed  <- personal_space_depth_gate_server_stamp_and_cascade
