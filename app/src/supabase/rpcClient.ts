@@ -30,8 +30,8 @@ export function createRpcClientFrom(call: Call): RpcClient {
       const n = names[rpc];
       if (!n) throw new Error(`unknown rpc ${rpc}`);
       if (n.length !== args.length + 1) throw new Error(`rpc ${rpc}: expected ${n.length - 1} args, got ${args.length}`);
-      const body: Record<string, unknown> = { [n[0]]: opId };
-      args.forEach((a, i) => { body[n[i + 1]] = a; });
+      const body: Record<string, unknown> = { [n[0]!]: opId };
+      args.forEach((a, i) => { body[n[i + 1]!] = a; });
       return (await run(rpc, body)) as RpcResult;
     },
     async pull(stream, afterXid, afterId, horizon, limit): Promise<PullPage> {
