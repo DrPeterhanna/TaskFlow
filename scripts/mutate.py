@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
 import harness  # noqa: E402
 import test_phase2  # noqa: E402,F401
+import test_lifecycle  # noqa: E402,F401
 
 M = [
     ("0003_organizations_units_closure.sql", "perform app_private.raise_tf('cycle_detected', 'unit cannot move under itself or a descendant');", "null;", "cycle guard removed"),
@@ -61,6 +62,17 @@ M = [
     ("0010_personal_space_and_sync_pull.sql", "and c.status not in ('done', 'canceled') and c.deleted_at is null) then", "and false) then", "personal completion gate removed"),
     ("0010_personal_space_and_sync_pull.sql", "if v_parent.depth >= 2 then", "if false then", "personal depth limit removed"),
     ("0008_rls_and_rpc.sql", "perform app_private.require_verified_email();\n  if p_name is null", "if p_name is null", "unverified email may create org"),
+    ('0014_account_lifecycle.sql', "    perform app_private.raise_tf('validation', 'last admin: transfer the admin role or close the organization first');", '    null;', '0014 last-admin guard removed'),
+    ('0014_account_lifecycle.sql', "  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('org-admins:' || v_m.org_id::text, 0));\n  if not exists", '  if not exists', '0014 last-admin lock removed'),
+    ('0014_account_lifecycle.sql', '  if exists (select 1 from app.organizations o where o.id = v_m.org_id and o.deleted_at is not null) then return; end if;\n', '', '0014 closed-org exemption removed'),
+    ('0014_account_lifecycle.sql', "  if tg_op = 'DELETE' and pg_catalog.current_setting('app_private.erasing_user', true) = old.user_id::text then", "  if tg_op = 'DELETE' then", '0014 personal events deletable by anyone'),
+    ('0014_account_lifecycle.sql', '  perform app_private.assert_not_last_admin(v_actor.id);\n  perform app_private.remove_membership(v_actor.id, v_actor.id, p_op_id', '  perform app_private.remove_membership(v_actor.id, v_actor.id, p_op_id', '0014 leave skips last-admin check'),
+    ('0014_account_lifecycle.sql', "  if v_actor.role <> 'admin' then perform app_private.raise_tf('forbidden'); end if;\n  v_org := v_actor.org_id;", '  v_org := v_actor.org_id;', '0014 anyone may close org'),
+    ('0014_account_lifecycle.sql', "    perform app_private.raise_tf('validation', 'remove or transfer all other members first');", '    null;', '0014 close with other members allowed'),
+    ('0014_account_lifecycle.sql', "    execute pg_catalog.format('delete from %s where %I = $1', r.tbl, r.col) using v_uid;", '    null;', '0014 personal data not erased'),
+    ('0014_account_lifecycle.sql', '  select p.id from app.profiles p where p.auth_user_id = auth.uid() and p.deleted_at is null\n', '  select p.id from app.profiles p where p.auth_user_id = auth.uid()\n', '0014 deleted profile still authenticates (uid)'),
+    ('0014_account_lifecycle.sql', "  if v is null then perform app_private.raise_tf('unauthenticated'); end if;", '  null;', '0014 require_uid does not reject'),
+    ('0014_account_lifecycle.sql', '                          auth_user_id = null, deleted_at', '                          deleted_at', '0014 profile keeps auth link after deletion'),
 ]
 
 

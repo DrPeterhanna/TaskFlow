@@ -7,27 +7,43 @@
 --   * a deleted account loses all data access at once, even with an unexpired JWT (uid() returns null).
 -- Seed constraint for closure: close_organization needs the org to have no work and no other active member.
 
--- 1. profiles no longer hard-bound to auth.users (the delete trigger below owns the lifecycle)
+-- 1. Identity split WITHOUT dropping a referential guarantee: profiles.id becomes the persistent person id (equal to the
+--    Auth id at creation, so every existing reference is unchanged); the live link to Auth is profiles.auth_user_id, a real
+--    foreign key to auth.users that is set to NULL when the Auth user is deleted. Org-owned rows keep referencing profiles.id.
+alter table app.profiles add column auth_user_id uuid;
+update app.profiles set auth_user_id = id;
 alter table app.profiles drop constraint profiles_id_fkey;
+alter table app.profiles add constraint profiles_auth_user_fkey
+  foreign key (auth_user_id) references auth.users (id) on delete set null;
+alter table app.profiles add constraint profiles_auth_user_uq unique (auth_user_id);
+
+create or replace function app_private.handle_new_user()
+returns trigger language plpgsql security definer
+set search_path = ''
+as $$
+begin
+  insert into app.profiles (id, auth_user_id, display_name)
+  values (new.id, new.id, left(coalesce(new.raw_user_meta_data ->> 'display_name', ''), 100))
+  on conflict (id) do nothing;
+  return new;
+end $$;
 
 -- 2. a deleted (anonymised) profile has no identity: uid()/require_uid() stop honouring leftover JWTs
 create or replace function app_private.uid()
 returns uuid language sql stable security definer
 set search_path = ''
 as $$
-  select case when exists (select 1 from app.profiles p where p.id = auth.uid() and p.deleted_at is null)
-              then auth.uid() end
+  select p.id from app.profiles p where p.auth_user_id = auth.uid() and p.deleted_at is null
 $$;
 
 create or replace function app_private.require_uid()
 returns uuid language plpgsql stable security definer
 set search_path = ''
 as $$
-declare v uuid := auth.uid();
+declare v uuid;
 begin
-  if v is null or not exists (select 1 from app.profiles p where p.id = v and p.deleted_at is null) then
-    perform app_private.raise_tf('unauthenticated');
-  end if;
+  select p.id into v from app.profiles p where p.auth_user_id = auth.uid() and p.deleted_at is null;
+  if v is null then perform app_private.raise_tf('unauthenticated'); end if;
   return v;
 end $$;
 
@@ -136,21 +152,35 @@ create trigger personal_events_no_update before update or delete on app.personal
 grant delete on app.personal_events to app_rpc;
 create policy personal_events_rpc_d on app.personal_events for delete to app_rpc using (true);
 
--- 6. Auth user deletion hook (dashboard, admin API or any supported path)
+-- 6. Auth user deletion hooks (dashboard, admin API or any supported path)
+create function app_private.guard_user_deletion()
+returns trigger language plpgsql security definer
+set search_path = ''
+as $$
+declare r record;
+begin
+  for r in select m.id from app.memberships m join app.profiles p on p.id = m.user_id
+           where p.auth_user_id = old.id and m.status <> 'removed' order by m.id loop
+    perform app_private.assert_not_last_admin(r.id);
+  end loop;
+  return old;
+end $$;
+create trigger a_before_auth_user_deleted before delete on auth.users
+  for each row execute function app_private.guard_user_deletion();
+
 create function app_private.handle_user_deleted()
 returns trigger language plpgsql security definer
 set search_path = ''
 as $$
-declare r record; v_uid uuid := old.id;
+declare r record; v_uid uuid;
 begin
-  for r in select id from app.memberships where user_id = v_uid and status <> 'removed' order by id loop
-    perform app_private.assert_not_last_admin(r.id);
-  end loop;
+  select id into v_uid from app.profiles where auth_user_id = old.id;
+  if v_uid is null then return old; end if;
   for r in select id from app.memberships where user_id = v_uid and status <> 'removed' order by id loop
     perform app_private.remove_membership(r.id, r.id, null, pg_catalog.jsonb_build_object('reason', 'account_deleted'));
   end loop;
   perform pg_catalog.set_config('app_private.erasing_user', v_uid::text, true);
-  -- personal data: every table that cascaded from profiles is erased (org-owned data is RESTRICT and never listed)
+  -- personal data: every table that cascades from profiles is erased (org-owned data is RESTRICT and never listed)
   for r in
     select c.conrelid::regclass as tbl, a.attname as col
     from pg_catalog.pg_constraint c
@@ -162,11 +192,12 @@ begin
   end loop;
   perform pg_catalog.set_config('app_private.erasing_user', '', true);
   update app.profiles set display_name = '', avatar_path = null, timezone = null, reminder_time = null,
-                          deleted_at = coalesce(deleted_at, pg_catalog.now())
+                          auth_user_id = null, deleted_at = coalesce(deleted_at, pg_catalog.now())
   where id = v_uid;
   return old;
 end $$;
-create trigger on_auth_user_deleted after delete on auth.users
+-- BEFORE (not AFTER): the ON DELETE SET NULL referential action would otherwise clear the link first; one transaction either way
+create trigger b_on_auth_user_deleted before delete on auth.users
   for each row execute function app_private.handle_user_deleted();
 
 -- 7. ordinary-user RPCs

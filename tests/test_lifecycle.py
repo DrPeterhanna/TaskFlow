@@ -53,7 +53,17 @@ def lifecycle_member_deletion_erases_personal_data_keeps_org_history_and_blocks_
 def lifecycle_last_admin_blocked_is_atomic_then_retry_succeeds(env: Env) -> None:
     f = fixture(env)
     assert ptask(env, f.admin, "admin private")["ok"]
-    expect_pg(("TF004",), lambda: delete_user(env, f.admin))        # failed cleanup
+    try:
+        delete_user(env, f.admin)
+        raise AssertionError("deletion of the last admin must fail")
+    except Exception as e:                                           # failed cleanup, by the dedicated guard
+        assert "last admin: transfer" in str(e), str(e)
+    # the direct guard (not only the generic membership trigger) must be what stops leave
+    try:
+        env.rpc(f.admin, "leave_organization")
+        raise AssertionError("leave must fail")
+    except Exception as e:
+        assert "last admin: transfer" in str(e) or getattr(e, "code", "") == "validation", str(e)
     assert user_exists(env, f.admin)                                # nothing partly applied
     assert env.su("select status from app.memberships where id=%s", (f.mid["admin"],))[0][0] == "active"
     assert env.su("select count(*) from app.personal_tasks where user_id=%s", (f.admin,))[0][0] == 1
@@ -189,3 +199,12 @@ def lint_identity_is_resolved_only_through_uid(env: Env) -> None:
     pols = env.su("""select polname from pg_policy where pg_get_expr(polqual, polrelid) like '%auth.uid()%'
                         or pg_get_expr(polwithcheck, polrelid) like '%auth.uid()%'""")
     assert not pols, pols
+
+
+@test
+def lifecycle_personal_events_stay_append_only_outside_erasure(env: Env) -> None:
+    f = fixture(env)
+    assert ptask(env, f.mem, "x")["ok"]
+    expect_pg(("42501",), lambda: env.su("delete from app.personal_events where user_id=%s", (f.mem,)))
+    expect_pg(("42501",), lambda: env.su("update app.personal_events set kind='x' where user_id=%s", (f.mem,)))
+    assert env.su("select count(*) from app.personal_events where user_id=%s", (f.mem,))[0][0] >= 1

@@ -1,5 +1,6 @@
 import 'react-native-url-polyfill/auto';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { resolveSupabaseConfig, type RawEnv } from './config';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
 /**
@@ -7,11 +8,11 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
  * authorization). Never put a secret/service key or database password in EXPO_PUBLIC_* variables or in the app.
  * Configuration comes from environment variables (.env.local, untracked; see .env.example).
  */
-export function createSupabase(env: { url?: string; key?: string } = {
-  url: process.env.EXPO_PUBLIC_SUPABASE_URL, key: process.env.EXPO_PUBLIC_SUPABASE_KEY,
+export function createSupabase(raw: RawEnv = {
+  name: process.env.EXPO_PUBLIC_TASKFLOW_ENV, url: process.env.EXPO_PUBLIC_SUPABASE_URL, key: process.env.EXPO_PUBLIC_SUPABASE_KEY,
+  testRef: process.env.EXPO_PUBLIC_TEST_PROJECT_REF, allowProd: process.env.EXPO_PUBLIC_ALLOW_PRODUCTION,
 }): SupabaseClient {
-  if (!env.url || !env.key) throw new Error('Supabase is not configured: set EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_KEY');
-  if (/^sb_secret_|service_role/.test(env.key)) throw new Error('A secret key must never be used in the app');
+  const env = resolveSupabaseConfig(raw);
   return createClient(env.url, env.key, {
     auth: { storage: AsyncStorage, autoRefreshToken: true, persistSession: true, detectSessionInUrl: false },
   });
