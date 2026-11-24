@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
-  Outbox, PersonalTaskRepo, SyncEngine, TransportError, migrate, openNodeSqlite, uuidv7, backoffMs,
+  Outbox, PersonalTaskRepo, SyncEngine, TransportError, migrate, uuidv7, backoffMs,
   type Clock, type PullPage, type RpcClient, type RpcResult,
 } from '../src/sync/index.js';
+import { openNodeSqlite } from '../src/sync/nodeSqlite.js';
 
 class FakeClock implements Clock { t = 1_000_000; now() { return this.t; } }
 

@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { Outbox, PersonalTaskRepo, SyncEngine, migrate, openNodeSqlite } from '../src/sync/index.js';
+import { Outbox, PersonalTaskRepo, SyncEngine, migrate } from '../src/sync/index.js';
+import { openNodeSqlite } from '../src/sync/nodeSqlite.js';
 import { Bridge } from './bridgeClient.js';
 
 const bridge = new Bridge();

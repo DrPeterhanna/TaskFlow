@@ -3,5 +3,4 @@ export * from './ids.js';
 export * from './schema.js';
 export * from './outbox.js';
 export * from './engine.js';
-export * from './nodeSqlite.js';
 export * from './personalRepo.js';

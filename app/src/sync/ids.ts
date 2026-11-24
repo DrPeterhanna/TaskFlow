@@ -1,4 +1,3 @@
-import { randomBytes } from 'node:crypto';
 
 let lastMs = 0;
 let counter = 0;
@@ -16,12 +15,13 @@ export function uuidv7(nowMs: number = Date.now()): string {
     counter = 0;
   }
   lastMs = ms;
-  const b = randomBytes(16);
+  const b = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(b);   // Node, browsers; React Native via expo-crypto polyfill (see index.ts)
   const ts = BigInt(ms);
   for (let i = 0; i < 6; i++) b[i] = Number((ts >> BigInt(8 * (5 - i))) & 0xffn);
   b[6] = 0x70 | (counter >> 8);
   b[7] = counter & 0xff;
   b[8] = (b[8]! & 0x3f) | 0x80;
-  const h = b.toString('hex');
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
