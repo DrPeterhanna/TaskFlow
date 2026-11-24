@@ -97,28 +97,20 @@ export class SyncEngine {
   }
 
   /**
-   * Version chain. Each acknowledged op of this device reports the task's row_version before and after it. A delete queued behind it
-   * carries the version the user saw; this moves that base forward over the device's OWN ops only. If the version before our op is
-   * not the one we expected, somebody else changed the task in between: the queued delete's base is set to -1 so the server refuses it
-   * (terminal stale_conflict with the current values) instead of deleting an edit the user never saw.
+   * Keep the local copy of the task's server row_version in step with this device's OWN acknowledged ops (create: 0 -> 1). A foreign
+   * edit in between (version before our op is not the one we had) leaves the local value behind on purpose, so the next conditional
+   * delete is refused by the server. The delete itself lists this device's own ops (see PersonalTaskRepo.remove).
    */
   private advanceChain(op: { rpc: string; entity_type: string; entity_id: string }, res: { data?: unknown }): void {
     if (op.entity_type !== 'personal_tasks') return;
     let before: number | undefined, after: number | undefined;
     if (op.rpc === 'create_personal_task') { before = 0; after = 1; }
-    else { const d = res.data as { rv_before?: number; rv?: number; already?: boolean } | undefined; before = d?.rv_before; after = d?.rv; }
+    else { const d = res.data as { rv_before?: number; rv?: number } | undefined; before = d?.rv_before; after = d?.rv; }
     if (typeof before !== 'number' || typeof after !== 'number') return;
     const row = this.db.all<{ data_json: string }>("select data_json from local_rows where stream = 'personal_tasks' and id = ?", [op.entity_id])[0];
-    if (row) {
-      const d = JSON.parse(row.data_json) as { row_version?: number };
-      if ((d.row_version ?? 0) === before && op.rpc !== 'create_personal_task') this.db.run("update local_rows set data_json = ? where stream = 'personal_tasks' and id = ?", [JSON.stringify({ ...d, row_version: after }), op.entity_id]);
-    }
-    const dels = this.db.all<{ seq: number; args_json: string }>("select seq, args_json from outbox where entity_type = 'personal_tasks' and entity_id = ? and rpc = 'delete_personal_task_checked' and state = 'queued'", [op.entity_id]);
-    for (const d of dels) {
-      const a = JSON.parse(d.args_json) as [string, { row_version: number; subtree?: unknown }];
-      a[1] = { ...a[1], row_version: a[1].row_version === before ? after : -1 };
-      this.db.run('update outbox set args_json = ? where seq = ?', [JSON.stringify(a), d.seq]);
-    }
+    if (!row) return;
+    const d = JSON.parse(row.data_json) as { row_version?: number };
+    if ((d.row_version ?? 0) === before) this.db.run("update local_rows set data_json = ? where stream = 'personal_tasks' and id = ?", [JSON.stringify({ ...d, row_version: after }), op.entity_id]);
   }
 
   /** The server (0019) says which fields our edit replaced although we had not seen them: record them for the user. */

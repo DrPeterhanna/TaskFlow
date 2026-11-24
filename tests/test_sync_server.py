@@ -133,30 +133,75 @@ def checked_complete_and_reopen_are_idempotent_when_the_goal_is_already_reached(
     assert r["ok"] is False and r["code"] == "stale_conflict" and _row(env, t)[0] == "in_progress"
 
 
+def _subtree_base(env: Env, t: str, own: list[str] | None = None) -> dict:
+    rows = env.su("""with recursive sub as (select id, row_version from app.personal_tasks where id = %s and deleted_at is null
+                     union all select c.id, c.row_version from app.personal_tasks c join sub s on c.parent_id = s.id where c.deleted_at is null)
+                     select id::text, row_version from sub""", (t,))
+    return {"rows": {r[0]: r[1] for r in rows}, "own_ops": own or []}
+
+
 @test
-def checked_delete_refuses_a_remote_edit_and_a_remote_subtask_edit_unseen_by_the_device(env: Env) -> None:
+def checked_delete_refuses_any_unseen_change_in_the_subtree_and_the_refusal_is_terminal(env: Env) -> None:
+    """The device saw parent > child > grandchild. Each foreign change below must be refused before anything is deleted."""
     from harness import new_op
     u = env.user("c3@a.test", name="C3")
-    t = _task(env, u, "parent")
-    child = _task(env, u, "child", t)
-    st, ver, _, _ = _row(env, t)
-    sub = env.su("select count(*), coalesce(sum(row_version),0) from app.personal_tasks where parent_id = %s and deleted_at is null", (t,))[0]
-    base = {"row_version": ver, "subtree": {"n": sub[0], "sum": int(sub[1])}}
-    env.rpc(u, "update_personal_task_checked", child, {"title": "edited elsewhere"}, {"title": "child"})   # remote edit of a subtask
-    op = new_op()
-    r = env.rpc(u, "delete_personal_task_checked", t, base, op=op)
-    assert r["ok"] is False and r["code"] == "stale_conflict"
-    assert _row(env, t)[2] is False and _row(env, child)[2] is False and _row(env, child)[3] == "edited elsewhere"
-    assert env.rpc(u, "delete_personal_task_checked", t, base, op=op)["code"] == "stale_conflict"          # terminal on resend
-    # the parent itself edited elsewhere
-    env.rpc(u, "update_personal_task_checked", t, {"notes": "n"}, {"notes": None})
-    _, ver2, _, _ = _row(env, t)
-    sub2 = env.su("select count(*), coalesce(sum(row_version),0) from app.personal_tasks where parent_id = %s and deleted_at is null", (t,))[0]
-    assert env.rpc(u, "delete_personal_task_checked", t, {"row_version": ver}, op=new_op())["code"] == "stale_conflict"
-    fresh = env.rpc(u, "delete_personal_task_checked", t, {"row_version": ver2, "subtree": {"n": sub2[0], "sum": int(sub2[1])}})
-    assert fresh["ok"] is True and fresh["data"]["rows"] == 2 and _row(env, t)[2] and _row(env, child)[2]
-    again = env.rpc(u, "delete_personal_task_checked", t, base)                                              # already deleted: idempotent
+    t = _task(env, u, "parent"); child = _task(env, u, "child", t); gc = _task(env, u, "grandchild", child)
+    seen = _subtree_base(env, t)
+    live = lambda *ids: [_row(env, x)[2] for x in ids]  # noqa: E731
+
+    def refused(base: dict, why: str) -> str:
+        op = new_op()
+        r = env.rpc(u, "delete_personal_task_checked", t, base, op=op)
+        assert r["ok"] is False and r["code"] == "stale_conflict", (why, r)
+        assert live(t, child, gc) == [False, False, False], why                      # nothing deleted
+        return op
+
+    env.rpc(u, "update_personal_task_checked", gc, {"title": "edited elsewhere"}, {"title": "grandchild"})   # (a) remote edit of a deep subtask
+    op = refused(seen, "grandchild edit")
+    env.rpc(u, "update_personal_task_checked", gc, {"title": "grandchild"}, {"title": "edited elsewhere"})   # values change back, row_version does not
+    assert env.rpc(u, "delete_personal_task_checked", t, seen, op=op)["code"] == "stale_conflict"            # same op: terminal
+    refused(seen, "versions never go back")
+    seen = _subtree_base(env, t)
+    new_child = _task(env, u, "added elsewhere", t)                                                         # (b) remote new subtask
+    refused(seen, "new subtask")
+    seen = _subtree_base(env, t)
+    env.rpc(u, "delete_personal_task", new_child); seen = _subtree_base(env, t)
+    env.rpc(u, "restore_personal_task", new_child)                                                          # (c) remote restore of a deleted subtask
+    refused(seen, "restored subtask")
+    seen = _subtree_base(env, t)
+    env.rpc(u, "update_personal_task_checked", t, {"notes": "n"}, {"notes": None})                          # (d) remote edit of the task itself
+    refused(seen, "root edit")
+    # a remotely DELETED subtask loses nothing when its parent is deleted too: allowed
+    seen = _subtree_base(env, t)
+    env.rpc(u, "delete_personal_task", new_child)
+    seen = _subtree_base(env, t)
+    r = env.rpc(u, "delete_personal_task_checked", t, seen)
+    assert r["ok"] is True and live(t, child, gc) == [True, True, True]
+    again = env.rpc(u, "delete_personal_task_checked", t, seen)                                             # already deleted: idempotent
     assert again["ok"] is True and again["data"]["already"] is True
+
+
+@test
+def checked_delete_accounts_for_the_devices_own_earlier_ops_but_not_for_anyone_elses(env: Env) -> None:
+    from harness import new_op
+    u = env.user("c6@a.test", name="C6")
+    t = _task(env, u, "p")
+    seen = _subtree_base(env, t)
+    o1, o2, o3 = new_op(), new_op(), new_op()
+    import uuid
+    ch = str(uuid.uuid4())
+    env.rpc(u, "create_personal_task", ch, t, "own child", None, op=o1)                                      # own ops after the base was taken
+    env.rpc(u, "update_personal_task_checked", ch, {"title": "own child 2"}, {"title": "own child"}, op=o2)
+    env.rpc(u, "update_personal_task_checked", t, {"notes": "mine"}, {"notes": None}, op=o3)
+    ok = env.rpc(u, "delete_personal_task_checked", t, {**seen, "own_ops": [o1, o2, o3]})
+    assert ok["ok"] is True
+    # same chain, but someone else ALSO edited the child in between: not covered by own_ops
+    t2 = _task(env, u, "p2"); seen2 = _subtree_base(env, t2)
+    ch2 = str(uuid.uuid4()); m1 = new_op()
+    env.rpc(u, "create_personal_task", ch2, t2, "c", None, op=m1)
+    env.rpc(u, "update_personal_task_checked", ch2, {"title": "foreign"}, {"title": "c"})               # no own op id
+    r = env.rpc(u, "delete_personal_task_checked", t2, {**seen2, "own_ops": [m1]})
+    assert r["ok"] is False and r["code"] == "stale_conflict" and _row(env, t2)[2] is False
 
 
 @test
@@ -165,8 +210,8 @@ def checked_mutations_require_a_base_refuse_other_users_and_deleted_tasks(env: E
     t = _task(env, u)
     for fn, base in (("complete_personal_task_checked", {}), ("reopen_personal_task_checked", {}), ("delete_personal_task_checked", {})):
         expect_tf("validation", lambda fn=fn, base=base: env.rpc(u, fn, t, base))
-    for fn, base in (("complete_personal_task_checked", {"status": "todo"}), ("delete_personal_task_checked", {"row_version": 1})):
+    for fn, base in (("complete_personal_task_checked", {"status": "todo"}), ("delete_personal_task_checked", {"rows": {}})):
         expect_tf("not_found", lambda fn=fn, base=base: env.rpc(w, fn, t, base))                    # not the owner
-    assert env.rpc(u, "delete_personal_task_checked", t, {"row_version": _row(env, t)[1]})["ok"]
+    assert env.rpc(u, "delete_personal_task_checked", t, _subtree_base(env, t))["ok"]
     expect_tf("not_found", lambda: env.rpc(u, "complete_personal_task_checked", t, {"status": "todo"}))   # tombstone
     assert _row(env, t)[2] is True
