@@ -105,7 +105,8 @@ def lint_clients_have_no_write_privileges_and_anon_has_none(env: Env) -> None:
     assert callable_ == {"create_organization", "create_unit", "rename_unit", "move_unit", "create_invitation",
                          "revoke_invitation", "redeem_invitation", "set_member_role", "move_member",
                          "set_member_status", "grant_permission", "revoke_permission", "update_profile", "current_epoch",
-                         "create_personal_task", "complete_personal_task", "create_personal_note", "sync_pull"}, callable_
+                         "create_personal_task", "complete_personal_task", "create_personal_note", "sync_pull",
+                         "rotate_invitation_code"}, callable_
     priv = env.su("""select p.proname from pg_proc p join pg_namespace n on n.oid=p.pronamespace
         where n.nspname='app_private' and has_function_privilege('authenticated', p.oid, 'execute') order by 1""")
     assert {r[0] for r in priv} == {"my_membership_id", "is_active_member", "me_has_authority_over_membership",
@@ -360,15 +361,73 @@ def invitations_code_never_stored_plain_and_not_replayed(env: Env) -> None:
     dump = env.su("select (select string_agg(code_hash, ',') from app.invitations) || (select coalesce(string_agg(result::text, ','), '') from app.op_receipts) || (select string_agg(payload::text, ',') from app.events)")[0][0]
     assert code not in dump
     replay = env.rpc(f.admin, "create_invitation", "member", f.u1, 1, FUTURE, op=op)
-    # lost response: the retry rotates the code of the SAME unused invitation, no second invitation
-    assert replay["data"]["invitation_id"] == r["data"]["invitation_id"] and replay["data"]["code"] != code
+    # lost response: the retry returns the SAME code and the SAME invitation (stable replay)
+    assert replay["data"]["invitation_id"] == r["data"]["invitation_id"] and replay["data"]["code"] == code
     assert env.su("select count(*) from app.invitations")[0][0] == 5
+    secret = env.su("select secret from app.server_secrets")[0][0]
+    dump = env.su("select (select string_agg(code_hash, ',') from app.invitations) || (select coalesce(string_agg(result::text, ','), '') from app.op_receipts) || (select string_agg(payload::text, ',') from app.events)")[0][0]
+    assert code not in dump and secret not in dump
     u = env.user("late@a.test")
-    assert env.rpc(u, "redeem_invitation", code)["ok"] is False            # the lost code is dead
-    assert env.rpc(u, "redeem_invitation", replay["data"]["code"])["ok"] is True
+    assert env.rpc(u, "redeem_invitation", code)["ok"] is True
     after = env.rpc(f.admin, "create_invitation", "member", f.u1, 1, FUTURE, op=op)
-    assert "code" not in after["data"]                                     # used: nothing to recover
+    assert "code" not in after["data"]                                     # used up: no usable code to return
+    expect_pg(("42501",), lambda: rows(env, f.admin, "select * from app.server_secrets"))
 
+
+@test
+def invitations_concurrent_and_delayed_duplicates_return_same_usable_code(env: Env) -> None:
+    f = fixture(env)
+    op = new_op()
+    out: list[Any] = []
+    barrier = threading.Barrier(4)
+
+    def worker() -> None:
+        try:
+            barrier.wait()
+            out.append(env.rpc(f.admin, "create_invitation", "member", f.u1, 3, FUTURE, op=op))
+        except Exception as e:  # noqa: BLE001
+            out.append(e)
+
+    ts = [threading.Thread(target=worker) for _ in range(4)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert all(isinstance(o, dict) for o in out), out
+    assert len({o["data"]["code"] for o in out}) == 1 and len({o["data"]["invitation_id"] for o in out}) == 1
+    code = out[0]["data"]["code"]
+    n_before = env.su("select count(*) from app.invitations")[0][0]
+    # the delivered code works; a delayed duplicate arriving afterwards does not invalidate anything
+    u1, u2 = env.user("d1@a.test"), env.user("d2@a.test")
+    assert env.rpc(u1, "redeem_invitation", code)["ok"] is True
+    late = env.rpc(f.admin, "create_invitation", "member", f.u1, 3, FUTURE, op=op)
+    assert late["data"]["code"] == code
+    assert env.rpc(u2, "redeem_invitation", code)["ok"] is True            # multi-use code still valid after the duplicate
+    assert env.su("select count(*) from app.invitations")[0][0] == n_before
+    # a creator who lost authority cannot create more, and fresh calls are refused
+    inv = env.rpc(f.sup, "create_invitation", "member", f.u1a, 1, FUTURE, op=new_op())
+    op3 = new_op()
+    first = env.rpc(f.sup, "create_invitation", "member", f.u1a, 1, FUTURE, op=op3)
+    env.rpc(f.admin, "set_member_status", f.mid["sup"], "suspended")
+    expect_tf("forbidden", lambda: env.rpc(f.sup, "create_invitation", "member", f.u1a, 1, FUTURE, op=new_op()))
+    assert inv["ok"] and first["ok"] and "code" in first["data"]
+
+
+@test
+def invitations_rotation_is_explicit_authorized_and_stable(env: Env) -> None:
+    f = fixture(env)
+    inv = env.rpc(f.admin, "create_invitation", "member", f.u1, 1, FUTURE)
+    old, iid = inv["data"]["code"], inv["data"]["invitation_id"]
+    expect_tf("forbidden", lambda: env.rpc(f.mem, "rotate_invitation_code", iid))
+    rop = new_op()
+    rot = env.rpc(f.admin, "rotate_invitation_code", iid, op=rop)
+    assert rot["data"]["code"] != old
+    again = env.rpc(f.admin, "rotate_invitation_code", iid, op=rop)       # duplicate of the rotation: same code
+    assert again["data"]["code"] == rot["data"]["code"]
+    u = env.user("rot@a.test")
+    assert env.rpc(u, "redeem_invitation", old)["ok"] is False
+    assert env.rpc(u, "redeem_invitation", rot["data"]["code"])["ok"] is True
+    expect_tf("validation", lambda: env.rpc(f.admin, "rotate_invitation_code", iid))   # used up
 
 
 # ---------------------------------------------------------------- idempotency receipts (offline foundation)
