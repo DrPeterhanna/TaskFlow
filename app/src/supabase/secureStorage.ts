@@ -34,3 +34,24 @@ export function chunkedSecureStorage(kv: KvBackend, chunkSize = 1800): AuthStora
     },
   };
 }
+
+/** Serialises operations per key (supabase-js refresh and sign-out can race) and moves a legacy plain-storage session into secure storage once. */
+export function safeAuthStorage(kv: KvBackend, legacy?: AuthStorage, chunkSize?: number): AuthStorage {
+  const inner = chunkedSecureStorage(kv, chunkSize);
+  const tails = new Map<string, Promise<unknown>>();
+  const run = <T,>(k: string, f: () => Promise<T>): Promise<T> => {
+    const p = (tails.get(k) ?? Promise.resolve()).then(f, f);
+    tails.set(k, p.catch(() => undefined)); return p;
+  };
+  return {
+    getItem: (k) => run(k, async () => {
+      const v = await inner.getItem(k); if (v !== null || !legacy) return v;
+      const old = await legacy.getItem(k); if (old === null) return null;
+      await inner.setItem(k, old);
+      if ((await inner.getItem(k)) === old) await legacy.removeItem(k); // remove plain copy only after the secure copy reads back identical
+      return old;
+    }),
+    setItem: (k, v) => run(k, async () => { await inner.setItem(k, v); if (legacy) await legacy.removeItem(k); }),
+    removeItem: (k) => run(k, async () => { await inner.removeItem(k); if (legacy) await legacy.removeItem(k); }),
+  };
+}

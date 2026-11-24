@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 vi.mock('react-native-url-polyfill/auto', () => ({}));
 vi.mock('expo-secure-store', () => ({ getItemAsync: async () => null, setItemAsync: async () => {}, deleteItemAsync: async () => {} }));
+vi.mock('@react-native-async-storage/async-storage', () => ({ default: { getItem: async () => null, setItem: async () => {}, removeItem: async () => {} } }));
 import { resolveSupabaseConfig as r, PRODUCTION_REF } from '../src/supabase/config';
 
 const pub = 'sb_publishable_abc';
