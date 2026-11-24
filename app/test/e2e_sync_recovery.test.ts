@@ -185,6 +185,42 @@ describe('local data cannot bypass server authorization (real local PG)', () => 
   });
 });
 
+describe('pull-then-push race closed by the server (0019, real local PG)', () => {
+  it('a remote edit that lands AFTER our last pull but BEFORE our push is reported by the server and shown as a conflict', async () => {
+    const uid = await bridge.user('race1@test.dev');
+    const a = await device(uid), b = await device(uid);
+    const id = await synced(a, b, 'Base');
+    a.repo.update(id, { title: 'A wins last' });          // A has pulled everything it will see; now B sneaks in
+    b.repo.update(id, { title: 'B in between' }); await b.engine.push();
+    await a.engine.push();                                  // no pull in between: client-only detection cannot see B
+    expect(await serverTitle(id)).toBe('A wins last');
+    const c = a.db.all<{ field: string; state: string; server_value: string; local_value: string }>('select field, state, server_value, local_value from sync_conflicts');
+    expect(c).toEqual([{ field: 'title', state: 'applied', server_value: '"B in between"', local_value: '"A wins last"' }]);
+  });
+  it('no conflict when the other device changed a different field', async () => {
+    const uid = await bridge.user('race2@test.dev');
+    const a = await device(uid), b = await device(uid);
+    const id = await synced(a, b, 'Base');
+    a.repo.update(id, { title: 'Only title' });
+    b.repo.update(id, { planned_date: '2026-12-30' }); await b.engine.push();
+    await a.engine.push();
+    expect(a.db.all('select * from sync_conflicts')).toHaveLength(0);
+    expect(await bridge.sql(`select title, planned_date::text from app.personal_tasks where id = '${id}'`)).toEqual([['Only title', '2026-12-30']]);
+  });
+  it('baseline fallback: a server without 0019 gets the plain update with the same op id', async () => {
+    const uid = await bridge.user('race3@test.dev');
+    const a = await device(uid); const id = a.repo.create('X'); await a.engine.push();
+    const real = bridge.client(uid);
+    const old: typeof real = { ...real, call: async (rpc, args, op) => (rpc === 'update_personal_task_checked' ? ({ ok: false, code: 'unsupported' } as never) : real.call(rpc, args, op)) };
+    const e2 = new SyncEngine(a.db, a.outbox, old, undefined, () => 0);
+    a.repo.update(id, { title: 'Y' });
+    const opId = a.db.all<{ op_id: string }>("select op_id from outbox where state = 'queued'")[0]!.op_id;
+    await e2.push();
+    expect(await serverTitle(id)).toBe('Y');
+    expect(a.db.all<{ op_id: string; rpc: string }>("select op_id, rpc from outbox where op_id = ?", [opId])[0]!.rpc).toBe('update_personal_task');
+  });
+});
+
 describe('sync_status (migration 0017) against real local PG', () => {
   it('fresh cursor and current cursor do not require a full resync; a cursor below the floor does', async () => {
     const uid = await bridge.user('st1@test.dev'); const c = bridge.client(uid);

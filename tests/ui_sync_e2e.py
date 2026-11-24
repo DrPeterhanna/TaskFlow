@@ -49,6 +49,7 @@ def main() -> None:
             wait_for(lambda: "Offline" in chip(a), "A offline chip")
             a.get_by_test_id("sync-chip-button").click()
             wait_for(lambda: "saved on this device" in a.get_by_test_id("sync-queued").inner_text(), "queued text")
+            assert "Next automatic try" not in a.get_by_test_id("sync-panel").inner_text()   # offline: no retry countdown is claimed
             a.screenshot(path=str(SHOTS / "05_sync_panel_offline.png"))
             results.append("offline: panel says 1 change is saved on this device, not yet on the server")
             d.get_by_test_id("delete").first.click()
@@ -58,7 +59,7 @@ def main() -> None:
             a.get_by_test_id("offline-switch").click()
             wait_for(lambda: a.get_by_test_id("inbox-rejected").count() == 1, "rejected item in inbox", 20)
             txt = a.get_by_test_id("inbox-rejected").inner_text()
-            assert "Shared task" in txt and "no longer exists" in txt, txt
+            assert "Shared task" in txt and "deleted or no longer available" in txt, txt
             assert sql("select status, completed_at is null, deleted_at is not null from app.personal_tasks") == [["todo", True, True]]   # tombstone untouched
             assert "need your decision" in chip(a), chip(a)
             a.screenshot(path=str(SHOTS / "06_sync_panel_rejected.png"))

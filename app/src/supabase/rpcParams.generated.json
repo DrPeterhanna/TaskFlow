@@ -152,6 +152,12 @@
   "p_id",
   "p_patch"
  ],
+ "update_personal_task_checked": [
+  "p_op_id",
+  "p_id",
+  "p_patch",
+  "p_base"
+ ],
  "update_profile": [
   "p_op_id",
   "p_patch"

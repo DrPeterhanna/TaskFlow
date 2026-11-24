@@ -26,6 +26,8 @@ export function createRpcClientFrom(call: Call): RpcClient {
         try { const d = JSON.parse(r.error.details ?? '{}') as { code?: string }; if (d.code) code = d.code; } catch { /* keep SQLSTATE */ }
         return { ok: false, code, message: r.error.message };
       }
+      // Function missing on this server (migration not applied): PostgREST 404 PGRST202 / SQLSTATE 42883. Not a transport problem.
+      if (r.status === 404 && (r.error.code === 'PGRST202' || r.error.code === '42883')) return { ok: false, code: 'unsupported', message: r.error.message };
       // A 4xx the database raised itself (constraint or data error, SQLSTATE class 22/23) is a permanent "no": retrying the same
       // op can never succeed and would block every op queued behind it, so it is a rejection the user can see.
       if (r.status >= 400 && r.status < 500 && r.status !== 408 && r.status !== 429 && /^(22|23)/.test(r.error.code ?? '')) {

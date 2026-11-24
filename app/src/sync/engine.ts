@@ -30,10 +30,14 @@ export class SyncEngine {
       try {
         const res = await this.rpc.call(op.rpc, JSON.parse(op.args_json) as unknown[], op.op_id);
         this.db.transaction(() => {
-          if (res.ok) { this.outbox.ack(op.seq); this.clearPending(op.entity_type, op.entity_id); }
-          else { this.rollbackRejected(this.outbox.reject(op.seq, res.code, res.message)); }
+          if (res.ok) { this.outbox.ack(op.seq); this.recordOverwrites(op, res); this.clearPending(op.entity_type, op.entity_id); }
+          else if (res.code === 'unsupported' && op.rpc === 'update_personal_task_checked') {
+            // Server without migration 0019: fall back to the plain update (client-side conflict detection only). Same op_id is kept.
+            const a = JSON.parse(op.args_json) as unknown[];
+            this.db.run("update outbox set rpc = 'update_personal_task', args_json = ?, state = 'queued', attempts = 0, next_attempt_at = 0 where seq = ?", [JSON.stringify([a[0], a[1]]), op.seq]);
+          } else { this.rollbackRejected(this.outbox.reject(op.seq, res.code, res.message)); }
         });
-        if (res.ok) rep.acked++; else rep.rejected++;
+        if (res.ok) rep.acked++; else if (res.code === 'unsupported' && op.rpc === 'update_personal_task_checked') rep.sent--; else rep.rejected++;
       } catch (e) {
         if (!(e instanceof TransportError)) throw e;
         if (e.kind === 'unauthorized') {
@@ -83,6 +87,19 @@ export class SyncEngine {
     if (more.length === 0) {
       this.db.run('update local_rows set pending = 0, base_json = null where stream = ? and id = ?', [entityType, entityId]);
       this.settle(entityType, entityId, 'acked');
+    }
+  }
+
+  /** The server (0019) says which fields our edit replaced although we had not seen them: record them for the user. */
+  private recordOverwrites(op: { rpc: string; entity_type: string; entity_id: string; args_json: string }, res: { data?: unknown }): void {
+    if (op.rpc !== 'update_personal_task_checked') return;
+    const over = (res.data as { overwritten?: Record<string, unknown> } | undefined)?.overwritten;
+    if (!over) return;
+    const [, patch, base] = JSON.parse(op.args_json) as [string, Record<string, unknown>, Record<string, unknown>];
+    for (const [f, was] of Object.entries(over)) {
+      this.db.run(`insert into sync_conflicts (stream, entity_id, kind, field, base_value, local_value, server_value, state, detected_at) values (?,?, 'field', ?,?,?,?, 'applied', ?)
+                   on conflict (stream, entity_id, kind, field, state) do update set server_value = excluded.server_value, local_value = excluded.local_value, detected_at = excluded.detected_at`,
+        [op.entity_type, op.entity_id, f, JSON.stringify(base?.[f] ?? null), JSON.stringify(patch[f] ?? null), JSON.stringify(was ?? null), this.clock.now()]);
     }
   }
 

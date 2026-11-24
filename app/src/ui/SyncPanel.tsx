@@ -12,7 +12,7 @@ export function SyncPanel({ store, st, locale, now = Date.now() }: { store: Task
   const x = strings(locale).sync;
   const sync = st.sync;
   if (!sync) return null;
-  const retryIn = sync.nextRetryAt !== null && sync.nextRetryAt > now ? Math.ceil((sync.nextRetryAt - now) / 1000) : null;
+  const retryIn = sync.phase === 'waiting_retry' && sync.nextRetryAt !== null && sync.nextRetryAt > now ? Math.ceil((sync.nextRetryAt - now) / 1000) : null;
   const last = sync.lastSyncedAt ? new Date(sync.lastSyncedAt).toLocaleTimeString(locale) : null;
   return (
     <View style={[s.panel, { backgroundColor: th.surface, borderColor: th.border }]} testID="sync-panel" accessibilityLiveRegion="polite">

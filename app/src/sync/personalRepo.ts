@@ -53,8 +53,14 @@ export class PersonalTaskRepo {
     }
     this.db.transaction(() => {
       if (!this.get(id)) throw new Error('task not found locally');
+      // base = what this device last saw for the edited fields (server-confirmed value, or the value before our first pending edit).
+      // The server compares it under the row lock and reports overwritten fields (migration 0019).
+      const r = this.db.all<{ data_json: string; base_json: string | null }>("select data_json, base_json from local_rows where stream = 'personal_tasks' and id = ?", [id])[0]!;
+      const seen = JSON.parse(r.base_json ?? r.data_json) as Record<string, unknown>;
+      const base: Record<string, unknown> = {};
+      for (const k of Object.keys(patch)) if (k in seen) base[k] = seen[k];
       this.patch(id, patch as Record<string, unknown>);
-      this.outbox.enqueue({ rpc: 'update_personal_task', entityType: 'personal_tasks', entityId: id, args: [id, patch] });
+      this.outbox.enqueue({ rpc: 'update_personal_task_checked', entityType: 'personal_tasks', entityId: id, args: [id, patch, base] });
     });
   }
 

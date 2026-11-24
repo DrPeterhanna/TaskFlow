@@ -59,3 +59,11 @@ tests/ui_e2e.py 8/8, tests/ui_shell_e2e.py 21/21 (fake backend), tests/ui_sync_e
 tests/postgrest_local.py 13/13, tests/upgrade_nonsuper.py applies 0001-0018
 Mutation (0017 x3, 0018 x1 server): 4 killed, 0 survived. Client mutants (manual, 7): 7 killed.
 Earlier server mutants 0-64 were not rerun against the final suite.
+
+--- update after 0019 (conflict reporting by the server) ---
+python3 tests/run.py all migrations 0001-0019:   67 passed, 0 failed
+baseline (0001-0013 + 0017) run.py:              49 passed, 18 failed (the 17 listed in SYNC_ARCHITECTURE.md section 8 plus the 0019 test)
+vitest all migrations:                           11 files, 126 passed, 0 failed
+vitest on baseline set:                          125 passed, 1 failed (the 0019 race test, expected: no 0019 there; the fallback test passes)
+ui_sync_e2e 4/4, ui_e2e 8/8, ui_shell_e2e 21/21 (fake backend)
+UI copy: rejected not_found now says 'deleted or no longer available to you' (does not reveal which). Retry countdown is shown only in waiting_retry.

@@ -23,7 +23,7 @@ Startup: `recoverInflight()` returns ops that were mid-send when the app died to
 ## 3. Conflict policy (explicit)
 * Unit of conflict: a field. The client sends only the fields the user edited, so edits to different fields on two devices both survive.
 * Same field edited on two devices: **last writer wins in the order requests reach the server.** This is deterministic and server-decided.
-* The user is told, not silently overwritten. Detection (client side, best effort): when a pull meets a row with a pending local op,
+* The user is told, not silently overwritten. Detection: primarily SERVER-reported (0019, closes the pull-then-push race); the client-side pull check remains as a second source: when a pull meets a row with a pending local op,
   the server row is not applied over the user's edit; if both sides changed the same field to different values a `sync_conflicts`
   record is created. After our op is acknowledged the record is "applied" (our value is now in effect) and the Sync panel offers
   "Restore the other value" (queues a normal update) or "Keep mine". If the server refuses our op, the record is closed and the server value stands.
@@ -65,6 +65,7 @@ English and Arabic strings exist. Screenshots: `/downloads/ui_shots/05_sync_pane
 | Migration | What | Baseline (0001-0013) dependency |
 |---|---|---|
 | 0017_sync_status | read-only `app_api.sync_status(stream, after_xid)`; true only when 0 < cursor < purge floor. Independent of identity helpers. | applies on baseline |
+| 0019_update_checked | `update_personal_task_checked(op, id, patch, base)`: same rules as update, plus the server reports fields whose current value differs from the base the device last saw (atomic under the row lock). Edit still applies. | applies on baseline; needs approval; client falls back without it |
 | 0018_complete_guard_deleted | `complete_personal_task` refuses a soft-deleted task. Defect found in 0010: completing a tombstone succeeded and rewrote it. | applies on baseline; needs approval before hosted use |
 Client (device) schema migration 3: `skipped_rows`, `sync_conflicts`.
 

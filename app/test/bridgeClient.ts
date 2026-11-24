@@ -20,6 +20,7 @@ export class Bridge {
     const r = await fetch(this.base + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     const j = await r.json();
     if (r.status === 400 && j.sqlstate) return { ok: false, code: 'rejected_by_server', message: j.error, sqlstate: j.sqlstate };   // mirrors createRpcClientFrom
+    if (r.status === 404 && j.pgcode === '42883') return { ok: false, code: 'unsupported', message: j.error };   // mirrors createRpcClientFrom
     if (!r.ok) throw new TransportError(`${r.status} ${JSON.stringify(j)}`, r.status === 401 ? 'unauthorized' : 'server');
     return j;
   }

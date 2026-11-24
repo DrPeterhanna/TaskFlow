@@ -82,7 +82,9 @@ class H(BaseHTTPRequestHandler):
                 self._send(404, {"error": "unknown"})
         except psycopg.Error as e:
             # like PostgREST: constraint / data errors are HTTP 400 carrying the SQLSTATE; anything else is a server error
-            if (e.pgcode or "")[:2] in ("22", "23"):
+            if e.pgcode == "42883":
+                self._send(404, {"error": str(e)[:300], "pgcode": e.pgcode})
+            elif (e.pgcode or "")[:2] in ("22", "23"):
                 self._send(400, {"error": str(e)[:300], "sqlstate": e.pgcode})
             else:
                 self._send(500, {"error": f"{type(e).__name__}: {str(e)[:300]}"})

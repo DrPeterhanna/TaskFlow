@@ -12,15 +12,21 @@ class Srv implements RpcClient {
   put(r: Partial<Row> & { id: string }) { this.rows.set(r.id, { ...(this.rows.get(r.id) ?? { title: '', status: 'todo' }), ...r, change_xid: String(++this.xid) } as Row); }
   async call(rpc: string, args: unknown[], opId: string): Promise<RpcResult> {
     if (this.receipts.has(opId)) return this.receipts.get(opId)!;
-    let res: RpcResult;
+    let res: RpcResult | undefined;
     if (this.reject) res = { ok: false, code: this.reject } as RpcResult;
     else {
       const id = args[0] as string;
       if (rpc === 'create_personal_task') this.put({ id, title: args[2] as string });
-      else if (rpc === 'update_personal_task') this.put({ id, ...(args[1] as object) });
+      else if (rpc === 'update_personal_task' || rpc === 'update_personal_task_checked') {
+        const cur = this.rows.get(id) as unknown as Record<string, unknown>, base = (args[2] ?? {}) as Record<string, unknown>, patch = args[1] as Record<string, unknown>;
+        const over: Record<string, unknown> = {};
+        for (const k of Object.keys(patch)) if (k in base && JSON.stringify(cur[k] ?? null) !== JSON.stringify(base[k]) && JSON.stringify(cur[k] ?? null) !== JSON.stringify(patch[k])) over[k] = cur[k] ?? null;
+        this.put({ id, ...patch });
+        res = { ok: true, data: { id, overwritten: over } } as RpcResult;
+      }
       else if (rpc === 'delete_personal_task') this.put({ id, deleted_at: 'now' });
       else if (rpc === 'complete_personal_task') this.put({ id, status: 'done' });
-      res = { ok: true, data: { id } };
+      res ??= { ok: true, data: { id } };
     }
     if (res.ok) this.receipts.set(opId, res);   // like the real server: a business error rolls back, no receipt is kept
     return res;
@@ -110,8 +116,8 @@ describe('conflict records', () => {
   it('update sends only the edited fields', async () => {
     const s = setup(); const id = await seed(s);
     s.repo.update(id, { title: 'Only title' });
-    const op = s.db.all<{ args_json: string }>("select args_json from outbox where rpc = 'update_personal_task'")[0]!;
-    expect(JSON.parse(op.args_json)).toEqual([id, { title: 'Only title' }]);
+    const op = s.db.all<{ args_json: string }>("select args_json from outbox where rpc = 'update_personal_task_checked'")[0]!;
+    expect(JSON.parse(op.args_json)).toEqual([id, { title: 'Only title' }, { title: 'Original' }]);   // patch + what this device last saw
   });
 });
 
