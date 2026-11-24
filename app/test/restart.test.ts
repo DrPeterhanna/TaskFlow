@@ -117,3 +117,23 @@ describe('sync phase derivation', () => {
     [{ rejected: 1, queued: 1 }, 'syncing'],
   ] as const)('%j -> %s', (o, phase) => { expect(deriveSyncPhase({ ...base, ...o })).toBe(phase); });
 });
+
+describe('REAL process kill (SIGKILL) during an active push, file-backed node SQLite; not a device', () => {
+  it('the killed process leaves its queue on disk; the next process recovers the inflight op with the same op_id and applies each op exactly once', async () => {
+    const { spawn } = await import('node:child_process');
+    const f = file();
+    const child = spawn('node', ['--experimental-sqlite', '--no-warnings', 'test/killRunner.mjs', '/test/killChild.ts', f], { stdio: ['ignore', 'pipe', 'inherit'] });
+    await new Promise<void>((res, rej) => { const t = setTimeout(() => rej(new Error('child never reached SENDING')), 30_000); child.stdout!.on('data', (d) => { if (String(d).includes('SENDING')) { clearTimeout(t); res(); } }); });
+    child.kill('SIGKILL');
+    await new Promise((r) => child.on('exit', r));
+    const db = openNodeSqlite(f);
+    const before = db.all<{ op_id: string; state: string }>('select op_id, state from outbox order by seq');
+    expect(before.map((o) => o.state)).toEqual(['inflight', 'queued']);
+    const srv = new Srv();
+    const store = createSqliteStore(db, srv, { autoSync: false });
+    expect(store.getState().sync).toMatchObject({ queued: 2 });
+    await store.sync();
+    expect(srv.applied).toEqual(before.map((o) => o.op_id));
+    expect(store.getState()).toMatchObject({ waiting: 0 });
+  }, 60_000);
+});

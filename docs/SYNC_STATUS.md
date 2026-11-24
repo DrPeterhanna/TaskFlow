@@ -22,7 +22,7 @@ See docs/TEST_RESULTS.txt for counts. Scenarios: offline write and flush; restar
 3. No retention/purge mechanism is built. Required design (not done): tombstones, op receipts and old-op replay must be bounded together; the watermark must be a proven cursor position (snapshot/transaction ordering), not 'highest purged change_xid'; unsent local work must be preserved and a purged delete must never be resurrected by a full resync. Only the client reaction to a floor that was set by hand is tested. The 0010 architecture schedules the purge for a later phase; Peter has now asked for a safe design in this phase.
 4. Authorization after revocation: personal-space ops depend only on the signed-in user. Tests for a suspended or role-changed org member exist at server level (test_phase2) but there is no client-queue test, because org operations are online-only. A removed/deleted account (0014, unapproved) with a queued personal op is untested.
 5. No title-edit screen; conflicts can only arise today from complete/reopen/delete and the repo update API.
-6. Restart tests use a file-backed node SQLite. Kill during an active network call is simulated, not a real process kill.
+6. Restart: a REAL OS process (SIGKILL) was killed during an active push on a file-backed node SQLite; the next process recovered the inflight op with the same op_id and applied both ops once (restart.test). Still untested: expo-sqlite and native OS termination (device scope).
 7. The browser UI tests cover reject and discard; conflict "Restore other value" is covered by the store test, not by a browser test.
 
 ## 4. Unverified assumptions
