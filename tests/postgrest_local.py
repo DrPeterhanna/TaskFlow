@@ -64,6 +64,14 @@ try:
     check("B cannot complete A's task", not (isinstance(r, dict) and r.get("ok") is True), (code, r))
     code, r = call("/rpc/complete_personal_task", {"p_op_id": new_op(), "p_id": tid}, ta)
     check("A completes own task", code == 200 and isinstance(r, dict) and r.get("ok") is True, (code, r))
+    # account deletion: B's UNEXPIRED token must stop working
+    tq.execute("delete from auth.users where id=%s", (B,))
+    code, r = call("/rpc/create_personal_task", {"p_op_id": new_op(), "p_id": new_op(), "p_parent_id": None, "p_title": "ghost", "p_planned_date": None}, tb)
+    check("deleted user's unexpired JWT cannot write", code >= 400 and 'unauthenticated' in json.dumps(r), (code, r))
+    code, r = call("/rpc/sync_pull", {"p_stream": "personal_tasks", "p_after_xid": "0", "p_after_id": "", "p_horizon": None, "p_limit": 50}, tb)
+    check("deleted user's unexpired JWT reads nothing", code >= 400 or not (r or {}).get("rows"), (code, str(r)[:150]))
+    code, r = call("/rpc/sync_pull", {"p_stream": "personal_tasks", "p_after_xid": "0", "p_after_id": "", "p_horizon": None, "p_limit": 50}, ta)
+    check("other user unaffected", code == 200, (code, str(r)[:150]))
 finally:
     proc.terminate()
 print(f"\n{sum(res)} passed, {len(res)-sum(res)} failed, {len(res)} total")

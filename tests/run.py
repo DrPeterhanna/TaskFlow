@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import harness  # noqa: E402
 import test_phase2  # noqa: E402,F401
+import test_lifecycle  # noqa: E402,F401
 
 
 def main() -> int:

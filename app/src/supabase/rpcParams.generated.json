@@ -8,6 +8,9 @@
   "p_op_id",
   "p_id"
  ],
+ "close_organization": [
+  "p_op_id"
+ ],
  "complete_personal_task": [
   "p_op_id",
   "p_id"
@@ -56,6 +59,9 @@
   "p_permission",
   "p_scope_unit_id",
   "p_expires_at"
+ ],
+ "leave_organization": [
+  "p_op_id"
  ],
  "move_member": [
   "p_op_id",

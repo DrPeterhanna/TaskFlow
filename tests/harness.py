@@ -206,7 +206,9 @@ def run_all(migrations_dir: Path, only: list[str] | None = None) -> dict[str, st
                 fn(env)
                 results[name] = "pass"
             except Exception as e:  # noqa: BLE001
-                results[name] = f"FAIL: {type(e).__name__}: {str(e)[:300]}"
+                import traceback
+                fr = [f for f in traceback.extract_tb(e.__traceback__) if f.filename.endswith(("test_phase2.py", "test_lifecycle.py"))]
+                results[name] = f"FAIL: {type(e).__name__}: {str(e)[:300]}" + (f" @{fr[-1].filename.split(chr(47))[-1]}:{fr[-1].lineno}" if fr else "")
             finally:
                 cluster.drop(env)
     finally:
