@@ -29,7 +29,7 @@ export class SyncEngine {
         const res = await this.rpc.call(op.rpc, JSON.parse(op.args_json) as unknown[], op.op_id);
         this.db.transaction(() => {
           if (res.ok) { this.outbox.ack(op.seq); this.clearPending(op.entity_type, op.entity_id); }
-          else { this.outbox.reject(op.seq, res.code, res.message); }
+          else { this.rollbackRejected(this.outbox.reject(op.seq, res.code, res.message)); }
         });
         if (res.ok) rep.acked++; else rep.rejected++;
       } catch (e) {
@@ -52,10 +52,32 @@ export class SyncEngine {
 
   resumeAfterTokenRefresh(): void { if (this.status === 'paused_unauthorized') this.status = 'waiting'; }
 
+  /**
+   * A rejected op must not leave a lie on screen. When an entity has no live ops left, restore its last
+   * server-confirmed value; a row that only ever existed locally is hidden (the op stays in the Sync Inbox).
+   */
+  private rollbackRejected(ops: Array<{ entity_type: string; entity_id: string }>): void {
+    for (const o of ops) {
+      if (this.outbox.hasLiveOps(o.entity_type, o.entity_id)) continue;
+      const r = this.db.all<{ base_json: string | null; change_xid: string | null }>(
+        'select base_json, change_xid from local_rows where stream = ? and id = ?', [o.entity_type, o.entity_id])[0];
+      if (!r) continue;
+      if (r.base_json !== null) {
+        this.db.run('update local_rows set data_json = base_json, base_json = null, deleted = 0, pending = 0 where stream = ? and id = ?', [o.entity_type, o.entity_id]);
+      } else if (r.change_xid === null) {
+        this.db.run('update local_rows set deleted = 1, pending = 0 where stream = ? and id = ?', [o.entity_type, o.entity_id]);
+      } else {
+        this.db.run('update local_rows set pending = 0 where stream = ? and id = ?', [o.entity_type, o.entity_id]);
+      }
+    }
+  }
+
   private clearPending(entityType: string, entityId: string): void {
+    // acked means the server knows the row; '0' marks "server-known, xid not yet pulled" (a pull overwrites it)
+    this.db.run("update local_rows set change_xid = coalesce(change_xid, '0') where stream = ? and id = ?", [entityType, entityId]);
     // A later queued op on the same entity keeps it pending.
     const more = this.db.all("select 1 as x from outbox where entity_type = ? and entity_id = ? and state in ('queued','inflight')", [entityType, entityId]);
-    if (more.length === 0) this.db.run('update local_rows set pending = 0 where stream = ? and id = ?', [entityType, entityId]);
+    if (more.length === 0) this.db.run('update local_rows set pending = 0, base_json = null where stream = ? and id = ?', [entityType, entityId]);
   }
 
   /**
@@ -78,7 +100,7 @@ export class SyncEngine {
           if (local && local.pending) continue;
           this.db.run(
             `insert into local_rows (stream, id, data_json, change_xid, pending, deleted) values (?,?,?,?,0,?)
-             on conflict (stream, id) do update set data_json = excluded.data_json, change_xid = excluded.change_xid, deleted = excluded.deleted`,
+             on conflict (stream, id) do update set data_json = excluded.data_json, change_xid = excluded.change_xid, deleted = excluded.deleted, base_json = null`,
             [stream, r.id, JSON.stringify(r), r.change_xid, r.deleted_at ? 1 : 0],
           );
         }

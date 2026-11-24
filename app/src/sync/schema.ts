@@ -33,6 +33,7 @@ const MIGRATIONS: string[] = [
      horizon text
    );
    create table meta (key text primary key, value text not null);`,
+  `alter table local_rows add column base_json text;   -- last server-confirmed value while an optimistic edit is pending`,
 ];
 
 export function migrate(db: SqlDriver): number {

@@ -59,8 +59,9 @@ export class Outbox {
     this.db.run("update outbox set state = 'acked', error_code = null where seq = ?", [seq]);
   }
   /** Business rejection: no retry. Dependents are rejected too so nothing silently disappears. */
-  reject(seq: number, code: string, message?: string): void {
+  reject(seq: number, code: string, message?: string): OutboxOp[] {
     this.db.run("update outbox set state = 'rejected', error_code = ?, error_message = ? where seq = ?", [code, message ?? null, seq]);
+    const hit = [seq];
     let frontier = [seq];
     while (frontier.length) {
       const kids = this.db.all<{ seq: number }>(
@@ -68,10 +69,15 @@ export class Outbox {
         frontier,
       );
       frontier = kids.map((k) => k.seq);
+      hit.push(...frontier);
       for (const k of frontier) {
         this.db.run("update outbox set state = 'rejected', error_code = 'dependency_rejected' where seq = ?", [k]);
       }
     }
+    return hit.map((s) => this.db.all<OutboxOp>('select * from outbox where seq = ?', [s])[0]!);
+  }
+  hasLiveOps(entityType: string, entityId: string): boolean {
+    return this.db.all("select 1 as x from outbox where entity_type = ? and entity_id = ? and state in ('queued','inflight')", [entityType, entityId]).length > 0;
   }
   retryLater(seq: number, delayMs: number): void {
     this.db.run("update outbox set state = 'queued', next_attempt_at = ? where seq = ?", [this.clock.now() + delayMs, seq]);

@@ -175,3 +175,28 @@ describe('pull', () => {
     expect(repo.list()).toHaveLength(0);
   });
 });
+
+describe('rejected optimistic writes are rolled back', () => {
+  it('restores the last server value for an edited row and hides a row that only existed locally', async () => {
+    const { repo, engine, server } = setup();
+    const id = repo.create('Server task');
+    await engine.push();
+    server.pages = [{ rows: [{ id, change_xid: '5', title: 'Server task', status: 'todo' }], horizon: '9', next_xid: '5', next_id: id }];
+    await engine.pull('personal_tasks');
+    repo.complete(id);
+    const fresh = repo.create('Never accepted');
+    expect(repo.get(id)!.status).toBe('done');
+    server.failNext.push({ ok: false, code: 'gate_failed' }, { ok: false, code: 'forbidden' });
+    await engine.push();
+    expect(repo.get(id)).toMatchObject({ status: 'todo', pending: false });
+    expect(repo.get(fresh)).toBeUndefined();
+  });
+  it('keeps the optimistic value when a later op for the same entity is still live', async () => {
+    const { repo, engine, server, outbox } = setup();
+    const id = repo.create('X');
+    outbox.enqueue({ rpc: 'complete_personal_task', entityType: 'personal_tasks', entityId: id, args: [id] });
+    server.failNext.push({ ok: false, code: 'forbidden' }, new TransportError('offline'));
+    await engine.push();
+    expect(outbox.counts().rejected).toBe(1);
+  });
+});

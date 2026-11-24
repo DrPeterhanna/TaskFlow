@@ -37,7 +37,7 @@ export class PersonalTaskRepo {
   remove(id: string): void {
     this.db.transaction(() => {
       if (!this.get(id)) throw new Error('task not found locally');
-      this.db.run("update local_rows set deleted = 1, pending = 1 where stream = 'personal_tasks' and id = ?", [id]);
+      this.db.run("update local_rows set deleted = 1, pending = 1, base_json = case when change_xid is not null and base_json is null then data_json else base_json end where stream = 'personal_tasks' and id = ?", [id]);
       this.outbox.enqueue({ rpc: 'delete_personal_task', entityType: 'personal_tasks', entityId: id, args: [id] });
     });
   }
@@ -55,7 +55,7 @@ export class PersonalTaskRepo {
 
   private patch(id: string, p: Record<string, unknown>): void {
     const r = this.db.all<{ data_json: string }>("select data_json from local_rows where stream = 'personal_tasks' and id = ?", [id])[0]!;
-    this.db.run("update local_rows set data_json = ?, pending = 1 where stream = 'personal_tasks' and id = ?",
+    this.db.run("update local_rows set data_json = ?, pending = 1, base_json = case when change_xid is not null and base_json is null then data_json else base_json end where stream = 'personal_tasks' and id = ?",
       [JSON.stringify({ ...(JSON.parse(r.data_json) as object), ...p }), id]);
   }
 }
