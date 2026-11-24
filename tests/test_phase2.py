@@ -1,0 +1,627 @@
+"""Phase 2 tests: database, RLS authorization, RPC, negative, concurrency, offline foundations.
+Run against local PostgreSQL via pgserver. This is NOT Supabase verification."""
+from __future__ import annotations
+
+import threading
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+import psycopg2
+from harness import Env, TFError, expect_pg, expect_tf, new_op, old_op, test
+
+FUTURE = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+
+
+@dataclass
+class Fx:
+    env: Env
+    admin: str
+    sup: str      # supervisor in U1
+    lead: str     # team leader in U1a
+    mem: str      # member in U1a
+    lead2: str    # team leader in U2 (peer branch)
+    outsider: str  # admin of another org
+    org: str
+    root: str
+    u1: str
+    u1a: str
+    u2: str
+    mid: dict[str, str]
+
+
+def join(env: Env, admin: str, user: str, role: str, unit: str) -> str:
+    inv = env.rpc(admin, "create_invitation", role, unit, 1, FUTURE)
+    r = env.rpc(user, "redeem_invitation", inv["data"]["code"])
+    assert r["ok"], r
+    return str(r["data"]["membership_id"])
+
+
+def fixture(env: Env) -> Fx:
+    admin = env.user("admin@a.test", name="Admin")
+    r = env.rpc(admin, "create_organization", "Acme", "Africa/Cairo")["data"]
+    org, root = str(r["org_id"]), str(r["unit_id"])
+    u1 = str(env.rpc(admin, "create_unit", root, "U1")["data"]["unit_id"])
+    u1a = str(env.rpc(admin, "create_unit", u1, "U1a")["data"]["unit_id"])
+    u2 = str(env.rpc(admin, "create_unit", root, "U2")["data"]["unit_id"])
+    sup, lead, mem, lead2, out = (env.user(f"{n}@a.test", name=n) for n in ("sup", "lead", "mem", "lead2", "out"))
+    mid = {"admin": str(r["membership_id"])}
+    mid["sup"] = join(env, admin, sup, "supervisor", u1)
+    mid["lead"] = join(env, admin, lead, "team_leader", u1a)
+    mid["mem"] = join(env, admin, mem, "member", u1a)
+    mid["lead2"] = join(env, admin, lead2, "team_leader", u2)
+    env.rpc(out, "create_organization", "Other Org", "Africa/Cairo")
+    return Fx(env, admin, sup, lead, mem, lead2, out, org, root, u1, u1a, u2, mid)
+
+
+def rows(env: Env, uid: str | None, sql: str) -> list[tuple[Any, ...]]:
+    return env.as_user(uid, sql)
+
+
+def mids(env: Env, uid: str) -> set[str]:
+    return {str(r[0]) for r in rows(env, uid, "select id from app.memberships")}
+
+
+# ---------------------------------------------------------------- schema lints (database tests)
+@test
+def lint_rls_enabled_and_forced_on_every_table(env: Env) -> None:
+    bad = env.su("""select c.relname from pg_class c join pg_namespace n on n.oid=c.relnamespace
+                    where n.nspname='app' and c.relkind='r' and not (c.relrowsecurity and c.relforcerowsecurity)""")
+    assert not bad, bad
+    assert env.su("select count(*) from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname='app' and c.relkind='r'")[0][0] >= 12
+
+
+@test
+def lint_functions_fixed_search_path_owner_and_no_public_execute(env: Env) -> None:
+    nosp = env.su("""select p.oid::regprocedure::text from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+                     where n.nspname in ('app_private','app_api')
+                       and not exists (select 1 from unnest(coalesce(p.proconfig,'{}')) c where c like 'search_path=%')""")
+    assert not nosp, f"functions without fixed search_path: {nosp}"
+    wrong_owner = env.su("""select p.oid::regprocedure::text from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+                            where n.nspname in ('app_private','app_api') and p.proname <> 'finalize_ownership'
+                              and pg_get_userbyid(p.proowner) <> 'app_rpc'""")
+    assert not wrong_owner, wrong_owner
+    pub = env.su("""select p.oid::regprocedure::text from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+                    where n.nspname in ('app_private','app_api') and p.proname <> 'finalize_ownership'
+                      and (has_function_privilege('public', p.oid, 'execute') or has_function_privilege('anon', p.oid, 'execute'))""")
+    assert not pub, f"public/anon EXECUTE: {pub}"
+    definer_nosp = env.su("""select p.oid::regprocedure::text from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+                    where n.nspname in ('app_private','app_api') and p.prosecdef
+                      and (p.proconfig is null or not exists (select 1 from unnest(p.proconfig) c where c = 'search_path=""'))""")
+    assert not definer_nosp, definer_nosp
+
+
+@test
+def lint_clients_have_no_write_privileges_and_anon_has_none(env: Env) -> None:
+    w = env.su("""select table_name, privilege_type from information_schema.role_table_grants
+                  where table_schema='app' and grantee in ('authenticated','anon','public')
+                    and privilege_type in ('INSERT','UPDATE','DELETE','TRUNCATE')""")
+    assert not w, w
+    anon = env.su("select count(*) from information_schema.role_table_grants where table_schema='app' and grantee in ('anon','public')")
+    assert anon[0][0] == 0
+    # authenticated may call only the documented RPCs plus current_epoch
+    callable_ = {r[0] for r in env.su("""select p.proname from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+        where n.nspname='app_api' and has_function_privilege('authenticated', p.oid, 'execute')""")}
+    assert callable_ == {"create_organization", "create_unit", "rename_unit", "move_unit", "create_invitation",
+                         "revoke_invitation", "redeem_invitation", "set_member_role", "move_member",
+                         "set_member_status", "grant_permission", "revoke_permission", "update_profile", "current_epoch"}, callable_
+    priv = env.su("""select p.proname from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+        where n.nspname='app_private' and has_function_privilege('authenticated', p.oid, 'execute') order by 1""")
+    assert {r[0] for r in priv} == {"my_membership_id", "is_active_member", "me_has_authority_over_membership",
+                                    "me_unit_in_scope", "me_is_admin_of", "me_can_see_profile", "me_in_org_of_unit"}, priv
+
+
+# ---------------------------------------------------------------- authentication
+@test
+def auth_profile_created_by_trigger_and_unauthenticated_calls_rejected(env: Env) -> None:
+    u = env.user("p@a.test", name="Pat")
+    assert env.su("select display_name from app.profiles where id=%s", (u,))[0][0] == "Pat"
+    expect_tf("unauthenticated", lambda: env.rpc(None, "create_organization", "X", "Africa/Cairo"))
+    c = env.conn(None, role="anon")
+    cur = c.cursor()
+    expect_pg(("42501",), lambda: cur.execute("select * from app.memberships"))
+    c.rollback()
+
+
+@test
+def auth_unverified_email_cannot_create_or_join(env: Env) -> None:
+    f = fixture(env)
+    u = env.user("unv@a.test", verified=False)
+    expect_tf("forbidden", lambda: env.rpc(u, "create_organization", "Nope", "Africa/Cairo"))
+    inv = env.rpc(f.admin, "create_invitation", "member", f.u1, 1, FUTURE)
+    expect_tf("forbidden", lambda: env.rpc(u, "redeem_invitation", inv["data"]["code"]))
+
+
+@test
+def org_creation_builds_root_admin_closure_and_events(env: Env) -> None:
+    f = fixture(env)
+    assert env.su("select role, status from app.memberships where id=%s", (f.mid["admin"],))[0] == ("admin", "active")
+    assert env.su("select count(*) from app.unit_closure where ancestor_id=%s", (f.root,))[0][0] == 4  # root, U1, U1a, U2
+    # one org cannot be created twice by the same user
+    expect_tf("validation", lambda: env.rpc(f.admin, "create_organization", "Again", "Africa/Cairo"))
+    expect_tf("validation", lambda: env.rpc(env.user("tz@a.test"), "create_organization", "T", "Mars/Base"))
+    assert env.su("select app_private.verify_chain(%s)", (f.org,))[0][0] is None
+
+
+# ---------------------------------------------------------------- hierarchy
+@test
+def hierarchy_closure_depth_and_move_subtree(env: Env) -> None:
+    f = fixture(env)
+    d = dict(env.su("select descendant_id::text, depth from app.unit_closure where ancestor_id=%s", (f.root,)))
+    assert d[f.root] == 0 and d[f.u1] == 1 and d[f.u1a] == 2 and d[f.u2] == 1
+    env.rpc(f.admin, "move_unit", f.u1, f.u2)   # U1 (and U1a) under U2
+    d = dict(env.su("select descendant_id::text, depth from app.unit_closure where ancestor_id=%s", (f.root,)))
+    assert d[f.u1] == 2 and d[f.u1a] == 3
+    assert env.su("select depth from app.org_units where id=%s", (f.u1a,))[0][0] == 3
+    assert env.su("select count(*) from app.unit_closure where ancestor_id=%s and descendant_id=%s", (f.u2, f.u1a))[0][0] == 1
+    assert env.su("select count(*) from app.unit_closure where ancestor_id=%s and descendant_id=%s", (f.u1, f.u2))[0][0] == 0
+
+
+@test
+def hierarchy_cycle_rejected_via_rpc_and_trigger_backstop(env: Env) -> None:
+    f = fixture(env)
+    expect_tf("cycle_detected", lambda: env.rpc(f.admin, "move_unit", f.u1, f.u1a))
+    expect_tf("cycle_detected", lambda: env.rpc(f.admin, "move_unit", f.u1, f.u1))
+    # backstop: a raw update by a privileged session is rejected by the trigger too
+    expect_pg(("TF008",), lambda: env.su("update app.org_units set parent_id=%s where id=%s", (f.u1a, f.u1)))
+    expect_tf("validation", lambda: env.rpc(f.admin, "move_unit", f.root, f.u1))
+
+
+@test
+def hierarchy_cross_org_and_root_rules(env: Env) -> None:
+    f = fixture(env)
+    other_root = str(env.su("select id from app.org_units where org_id <> %s and parent_id is null", (f.org,))[0][0])
+    expect_tf("not_found", lambda: env.rpc(f.admin, "create_unit", other_root, "X"))
+    expect_tf("not_found", lambda: env.rpc(f.admin, "move_unit", f.u1, other_root))
+    expect_tf("not_found", lambda: env.rpc(f.outsider, "move_unit", f.u1, f.u2))
+    expect_pg(("23505",), lambda: env.su("insert into app.org_units (org_id, parent_id, name) values (%s, null, 'second root')", (f.org,)))
+    expect_pg(("23503",), lambda: env.su("insert into app.org_units (org_id, parent_id, name) values (%s, %s, 'x')", (f.org, other_root)))
+
+
+# ---------------------------------------------------------------- RLS authorization matrix
+@test
+def rls_membership_visibility_follows_authority_down_only(env: Env) -> None:
+    f = fixture(env)
+    m = f.mid
+    assert mids(env, f.mem) == {m["mem"]}                         # member: self only (peer visibility is OPEN, default N)
+    assert mids(env, f.lead) == {m["lead"], m["mem"]}             # leader: self and below, not supervisor, not peer branch
+    assert mids(env, f.sup) == {m["sup"], m["lead"], m["mem"]}    # supervisor of U1: not lead2 (U2), not admin
+    assert mids(env, f.lead2) == {m["lead2"]}
+    assert mids(env, f.admin) == set(m.values())
+    assert mids(env, f.outsider) == {str(r[0]) for r in env.su("select id from app.memberships where user_id=%s", (f.outsider,))}
+
+
+@test
+def rls_profiles_org_data_events_follow_scope(env: Env) -> None:
+    f = fixture(env)
+    assert {str(r[0]) for r in rows(env, f.mem, "select id from app.profiles")} == {f.mem}
+    assert {str(r[0]) for r in rows(env, f.lead, "select id from app.profiles")} == {f.lead, f.mem}
+    assert len(rows(env, f.admin, "select id from app.profiles")) == 5
+    assert len(rows(env, f.mem, "select id from app.organizations")) == 1
+    assert rows(env, f.mem, "select id from app.organizations")[0][0] is not None
+    assert {str(r[0]) for r in rows(env, f.outsider, "select id from app.organizations")}.isdisjoint({f.org})
+    assert {r[0] for r in rows(env, f.mem, "select kind from app.events")} == {"invitation.redeemed", "member.joined"}  # only events the member acted in
+    assert len(rows(env, f.admin, "select id from app.events")) >= 10
+    assert rows(env, f.outsider, f"select id from app.org_units where org_id='{f.org}'") == []
+    assert rows(env, f.outsider, f"select * from app.unit_closure where ancestor_id='{f.root}'") == []
+
+
+@test
+def rls_invitation_hash_and_internal_tables_unreadable(env: Env) -> None:
+    f = fixture(env)
+    expect_pg(("42501",), lambda: rows(env, f.admin, "select code_hash from app.invitations"))
+    assert len(rows(env, f.admin, "select id, role from app.invitations")) == 4
+    assert rows(env, f.mem, "select id from app.invitations") == []
+    for t in ("op_receipts", "user_access_state", "scope_epochs", "invitation_attempts"):
+        expect_pg(("42501",), lambda t=t: rows(env, f.admin, f"select * from app.{t}"))
+
+
+@test
+def rls_clients_cannot_write_tables_directly(env: Env) -> None:
+    f = fixture(env)
+    for sql in (f"update app.memberships set role='admin' where user_id='{f.mem}'",
+                f"insert into app.org_units (org_id, parent_id, name) values ('{f.org}', '{f.root}', 'x')",
+                "delete from app.events", f"update app.profiles set display_name='x' where id='{f.mem}'",
+                "truncate app.events"):
+        for who in (f.mem, f.admin):
+            expect_pg(("42501",), lambda sql=sql, who=who: rows(env, who, sql))
+
+
+@test
+def rls_suspended_and_removed_members_lose_access(env: Env) -> None:
+    f = fixture(env)
+    env.rpc(f.admin, "set_member_status", f.mid["mem"], "suspended")
+    assert rows(env, f.mem, "select id from app.organizations") == []
+    assert rows(env, f.mem, "select id from app.org_units") == []
+    expect_tf("forbidden", lambda: env.rpc(f.mem, "update_profile", {"theme": "dark"}) and env.rpc(f.mem, "create_unit", f.u1a, "x"))
+    assert {str(r[0]) for r in rows(env, f.mem, "select id from app.memberships")} == {f.mid["mem"]}  # may see own status
+    env.rpc(f.admin, "set_member_status", f.mid["mem"], "active")
+    assert len(rows(env, f.mem, "select id from app.organizations")) == 1
+    env.rpc(f.admin, "set_member_status", f.mid["lead"], "removed")
+    assert rows(env, f.lead, "select id from app.org_units") == []
+    expect_tf("validation", lambda: env.rpc(f.admin, "set_member_status", f.mid["lead"], "active"))
+
+
+# ---------------------------------------------------------------- RPC authorization (positive and negative)
+@test
+def rpc_forbidden_matrix_without_grants(env: Env) -> None:
+    f = fixture(env)
+    for who in (f.mem, f.lead, f.sup, f.lead2):
+        expect_tf("forbidden", lambda who=who: env.rpc(who, "create_unit", f.root if who == f.lead2 else f.u1a, "n"))
+        expect_tf("forbidden", lambda who=who: env.rpc(who, "grant_permission", f.mid["mem"], "reopen_tasks", f.u1a, FUTURE))
+        expect_tf("forbidden", lambda who=who: env.rpc(who, "set_member_role", f.mid["mem"], "team_leader"))
+    expect_tf("forbidden", lambda: env.rpc(f.lead, "create_invitation", "member", f.u1a, 1, FUTURE))
+    expect_tf("forbidden", lambda: env.rpc(f.mem, "set_member_status", f.mid["lead"], "removed"))
+    # supervisor may invite below own rank inside own scope only
+    ok = env.rpc(f.sup, "create_invitation", "team_leader", f.u1a, 1, FUTURE)
+    assert ok["ok"]
+    expect_tf("forbidden", lambda: env.rpc(f.sup, "create_invitation", "team_leader", f.u2, 1, FUTURE))
+    expect_tf("forbidden", lambda: env.rpc(f.sup, "create_invitation", "supervisor", f.u1a, 1, FUTURE))
+    expect_tf("validation", lambda: env.rpc(f.admin, "create_invitation", "admin", f.u1a, 1, FUTURE))
+    expect_tf("not_found", lambda: env.rpc(f.outsider, "create_invitation", "member", f.u1, 1, FUTURE))
+
+
+@test
+def rpc_delegated_grants_scope_expiry_revocation(env: Env) -> None:
+    f = fixture(env)
+    g = env.rpc(f.admin, "grant_permission", f.mid["sup"], "manage_units", f.u1, FUTURE)["data"]["grant_id"]
+    assert env.rpc(f.sup, "create_unit", f.u1a, "ok under U1a")["ok"]
+    expect_tf("forbidden", lambda: env.rpc(f.sup, "create_unit", f.u2, "outside scope"))
+    expect_tf("forbidden", lambda: env.rpc(f.sup, "create_unit", f.root, "above scope"))
+    env.rpc(f.admin, "revoke_permission", g)
+    expect_tf("forbidden", lambda: env.rpc(f.sup, "create_unit", f.u1a, "revoked"))
+    # expired grant: insert via admin then age it with a privileged update
+    g2 = env.rpc(f.admin, "grant_permission", f.mid["sup"], "manage_units", f.u1, FUTURE)["data"]["grant_id"]
+    env.su("update app.permission_grants set expires_at = now() - interval '1 minute' where id=%s", (g2,))
+    expect_tf("forbidden", lambda: env.rpc(f.sup, "create_unit", f.u1a, "expired"))
+    # grants never exceed own authority: a grant scoped outside the holder's own scope is inert
+    env.rpc(f.admin, "grant_permission", f.mid["lead"], "create_invitations", f.u2, FUTURE)
+    expect_tf("forbidden", lambda: env.rpc(f.lead, "create_invitation", "member", f.u2, 1, FUTURE))
+    # grant target rules
+    expect_tf("validation", lambda: env.rpc(f.admin, "grant_permission", f.mid["admin"], "manage_units", f.u1, FUTURE))
+    expect_tf("validation", lambda: env.rpc(f.admin, "grant_permission", f.mid["mem"], "manage_units", f.u1, "2000-01-01T00:00:00Z"))
+    expect_tf("not_found", lambda: env.rpc(f.admin, "grant_permission", f.mid["mem"], "manage_units",
+              str(env.su("select id from app.org_units where org_id<>%s limit 1", (f.org,))[0][0]), FUTURE))
+
+
+@test
+def rpc_role_changes_respect_rank_and_scope(env: Env) -> None:
+    f = fixture(env)
+    env.rpc(f.admin, "grant_permission", f.mid["sup"], "change_roles", f.u1, FUTURE)
+    assert env.rpc(f.sup, "set_member_role", f.mid["mem"], "team_leader")["ok"]
+    expect_tf("forbidden", lambda: env.rpc(f.sup, "set_member_role", f.mid["mem"], "supervisor"))      # no escalation to own rank
+    expect_tf("forbidden", lambda: env.rpc(f.sup, "set_member_role", f.mid["lead2"], "member"))        # outside scope
+    expect_tf("forbidden", lambda: env.rpc(f.sup, "set_member_role", f.mid["admin"], "member"))        # above scope
+    assert env.rpc(f.admin, "set_member_role", f.mid["mem"], "supervisor")["ok"]
+
+
+@test
+def rpc_last_admin_cannot_be_demoted_removed_or_suspended(env: Env) -> None:
+    f = fixture(env)
+    expect_pg(("TF004",), lambda: env.rpc(f.admin, "set_member_role", f.mid["admin"], "member"))
+    expect_pg(("TF004",), lambda: env.rpc(f.admin, "set_member_status", f.mid["admin"], "removed"))
+    expect_pg(("TF004",), lambda: env.rpc(f.admin, "set_member_status", f.mid["admin"], "suspended"))
+    expect_pg(("TF004", "23503"), lambda: env.su("delete from app.memberships where id=%s", (f.mid["admin"],)))  # FK RESTRICT also blocks it
+    env.rpc(f.admin, "set_member_role", f.mid["sup"], "admin")
+    assert env.rpc(f.admin, "set_member_role", f.mid["admin"], "member")["ok"]      # allowed now: another admin exists
+    expect_pg(("TF004",), lambda: env.rpc(f.sup, "set_member_role", f.mid["sup"], "member"))
+
+
+@test
+def rpc_move_member_and_profile_update(env: Env) -> None:
+    f = fixture(env)
+    assert env.rpc(f.admin, "move_member", f.mid["mem"], f.u2)["ok"]
+    assert mids(env, f.lead) == {f.mid["lead"]}                       # visibility followed the move at once
+    assert f.mid["mem"] in mids(env, f.lead2)
+    expect_tf("forbidden", lambda: env.rpc(f.lead, "move_member", f.mid["mem"], f.u1a))
+    env.rpc(f.mem, "update_profile", {"display_name": "Mo", "theme": "dark"})
+    assert rows(env, f.mem, "select display_name, theme from app.profiles")[0] == ("Mo", "dark")
+    expect_tf("validation", lambda: env.rpc(f.mem, "update_profile", {"id": f.admin}))
+    expect_pg(("23514",), lambda: env.rpc(f.mem, "update_profile", {"theme": "neon"}))
+
+
+# ---------------------------------------------------------------- invitations
+@test
+def invitations_single_use_expiry_revocation_and_rate_limit(env: Env) -> None:
+    f = fixture(env)
+    inv = env.rpc(f.admin, "create_invitation", "member", f.u1, 1, FUTURE)
+    code, iid = inv["data"]["code"], inv["data"]["invitation_id"]
+    u = env.user("n1@a.test")
+    assert env.rpc(u, "redeem_invitation", code)["ok"]
+    u2 = env.user("n2@a.test")
+    assert env.rpc(u2, "redeem_invitation", code)["ok"] is False                      # exhausted
+    # revoked and expired
+    inv2 = env.rpc(f.admin, "create_invitation", "member", f.u1, 5, FUTURE)
+    env.rpc(f.admin, "revoke_invitation", inv2["data"]["invitation_id"])
+    assert env.rpc(u2, "redeem_invitation", inv2["data"]["code"])["ok"] is False
+    inv3 = env.rpc(f.admin, "create_invitation", "member", f.u1, 5, FUTURE)
+    env.su("update app.invitations set expires_at = now() - interval '1 second' where id=%s", (inv3["data"]["invitation_id"],))
+    assert env.rpc(u2, "redeem_invitation", inv3["data"]["code"])["ok"] is False
+    # rate limit: 5 failures per hour, then even a valid code is refused
+    u3 = env.user("n3@a.test")
+    for i in range(5):
+        r = env.rpc(u3, "redeem_invitation", f"wrong-{i}")
+        assert r["ok"] is False
+    good = env.rpc(f.admin, "create_invitation", "member", f.u1, 1, FUTURE)
+    expect_tf("rate_limited", lambda: env.rpc(u3, "redeem_invitation", good["data"]["code"]))
+    # members of an org cannot redeem a second invitation
+    expect_tf("validation", lambda: env.rpc(f.mem, "redeem_invitation", good["data"]["code"]))
+    assert iid
+
+
+@test
+def invitations_code_never_stored_plain_and_not_replayed(env: Env) -> None:
+    f = fixture(env)
+    op = new_op()
+    r = env.rpc(f.admin, "create_invitation", "member", f.u1, 1, FUTURE, op=op)
+    code = r["data"]["code"]
+    assert len(code) >= 32
+    dump = env.su("select (select string_agg(code_hash, ',') from app.invitations) || (select coalesce(string_agg(result::text, ','), '') from app.op_receipts) || (select string_agg(payload::text, ',') from app.events)")[0][0]
+    assert code not in dump
+    replay = env.rpc(f.admin, "create_invitation", "member", f.u1, 1, FUTURE, op=op)
+    assert "code" not in replay["data"] and replay["data"]["code_shown_once"] is True
+    assert env.su("select count(*) from app.invitations")[0][0] == 5
+
+
+# ---------------------------------------------------------------- idempotency receipts (offline foundation)
+@test
+def receipts_replay_returns_stored_result_without_second_effect(env: Env) -> None:
+    f = fixture(env)
+    op = new_op()
+    a = env.rpc(f.admin, "create_unit", f.u1, "Once", op=op)
+    b = env.rpc(f.admin, "create_unit", f.u1, "Once", op=op)
+    assert a == b
+    assert env.su("select count(*) from app.org_units where name='Once'")[0][0] == 1
+    assert env.su("select count(*) from app.events where request_op_id=%s", (op,))[0][0] == 1
+
+
+@test
+def receipts_argument_mismatch_and_cross_rpc_reuse_rejected(env: Env) -> None:
+    f = fixture(env)
+    op = new_op()
+    env.rpc(f.admin, "create_unit", f.u1, "A", op=op)
+    expect_tf("op_id_reuse", lambda: env.rpc(f.admin, "create_unit", f.u1, "B", op=op))
+    expect_tf("op_id_reuse", lambda: env.rpc(f.admin, "rename_unit", f.u1, "B", op=op))
+    assert env.su("select count(*) from app.org_units where name in ('A','B')")[0][0] == 1
+    # the same op id by another user is a different receipt key
+    assert env.rpc(f.sup, "update_profile", {"theme": "dark"}, op=op)["ok"]
+
+
+@test
+def receipts_expired_op_ids_never_replay_and_rejection_stores_nothing(env: Env) -> None:
+    f = fixture(env)
+    before = env.su("select count(*) from app.op_receipts")[0][0]
+    expect_tf("op_expired", lambda: env.rpc(f.admin, "create_unit", f.u1, "Old", op=old_op(120)))
+    assert env.su("select count(*) from app.org_units where name='Old'")[0][0] == 0
+    # even when the receipt has been purged: nothing is re-executed
+    op = new_op()
+    env.rpc(f.admin, "create_unit", f.u1, "Fresh", op=op)
+    expect_tf("validation", lambda: env.rpc(f.admin, "create_unit", f.u1, "x", op="00000000-0000-4000-8000-000000000000"))
+    # a rejected call leaves no receipt, so a corrected retry with the same op id is allowed
+    op2 = new_op()
+    expect_tf("forbidden", lambda: env.rpc(f.mem, "create_unit", f.u1a, "n", op=op2))
+    assert env.su("select count(*) from app.op_receipts where op_id=%s", (op2,))[0][0] == 0
+    assert env.su("select count(*) from app.op_receipts")[0][0] == before + 1
+
+
+@test
+def receipts_concurrent_retries_apply_once(env: Env) -> None:
+    f = fixture(env)
+    op = new_op()
+    out: list[Any] = []
+    barrier = threading.Barrier(4)
+
+    def worker() -> None:
+        try:
+            barrier.wait()
+            out.append(env.rpc(f.admin, "create_unit", f.u1, "Race", op=op))
+        except Exception as e:  # noqa: BLE001
+            out.append(e)
+
+    ts = [threading.Thread(target=worker) for _ in range(4)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert all(isinstance(o, dict) and o["ok"] for o in out), out
+    assert len({o["data"]["unit_id"] for o in out}) == 1
+    assert env.su("select count(*) from app.org_units where name='Race'")[0][0] == 1
+
+
+# ---------------------------------------------------------------- audit events
+@test
+def events_are_append_only_and_chain_detects_tampering(env: Env) -> None:
+    f = fixture(env)
+    for sql in ("update app.events set kind='x.y'", "delete from app.events", "truncate app.events"):
+        expect_pg(("42501",), lambda sql=sql: env.su(sql))
+    assert env.su("select app_private.verify_chain(%s)", (f.org,))[0][0] is None
+    n = env.su("select count(*) from app.events where org_id=%s", (f.org,))[0][0]
+    assert n >= 10
+    # a privileged operator who disables the trigger can rewrite a row; verification catches it
+    victim = env.su("select id from app.events where org_id=%s order by id offset 3 limit 1", (f.org,))[0][0]
+    env.su("alter table app.events disable trigger events_no_update")
+    env.su("update app.events set payload = payload || '{\"x\":1}'::jsonb where id=%s", (victim,))
+    assert env.su("select app_private.verify_chain(%s)", (f.org,))[0][0] == victim
+    # chain forks are refused by the unique (org_id, prev_hash) constraint
+    expect_pg(("23505",), lambda: env.su(
+        "insert into app.events (id, org_id, actor_kind, kind, subject_type, prev_hash, hash) "
+        "select 999999, org_id, 'system', 'a.b', 'x', prev_hash, repeat('a', 64) from app.events where org_id=%s limit 1", (f.org,)))
+
+
+@test
+def events_capture_every_mutation_with_actor_and_op(env: Env) -> None:
+    f = fixture(env)
+    op = new_op()
+    env.rpc(f.admin, "grant_permission", f.mid["sup"], "manage_units", f.u1, FUTURE, op=op)
+    env.rpc(f.admin, "set_member_role", f.mid["mem"], "team_leader")
+    env.rpc(f.admin, "move_member", f.mid["mem"], f.u2)
+    env.rpc(f.admin, "move_unit", f.u1a, f.u2)
+    kinds = {r[0] for r in env.su("select kind from app.events where org_id=%s", (f.org,))}
+    assert {"org.created", "unit.created", "member.joined", "invitation.created", "invitation.redeemed", "grant.created",
+            "member.role_changed", "member.moved", "unit.moved"} <= kinds
+    assert env.su("select actor_membership_id::text, request_op_id::text from app.events where kind='grant.created'")[0] == (f.mid["admin"], op)
+
+
+# ---------------------------------------------------------------- access epochs (sync foundation)
+@test
+def epochs_bump_on_grant_role_move_and_unit_move_and_never_decrease(env: Env) -> None:
+    f = fixture(env)
+
+    def ep(u: str) -> int:
+        return int(env.as_user(u, "select app_api.current_epoch()")[0][0])
+
+    seen = {u: ep(u) for u in (f.mem, f.lead, f.sup, f.admin, f.lead2)}
+
+    def bumped(who: str, label: str) -> None:
+        now = ep(who)
+        assert now > seen[who], f"{label}: epoch for {who[:6]} did not rise ({seen[who]} -> {now})"
+        seen[who] = now
+
+    env.rpc(f.admin, "grant_permission", f.mid["lead"], "create_invitations", f.u1a, FUTURE)
+    bumped(f.lead, "grant")
+    env.rpc(f.admin, "set_member_role", f.mid["mem"], "team_leader")
+    bumped(f.mem, "role change")
+    bumped(f.lead, "role change visible to leader of unit")
+    env.rpc(f.admin, "move_member", f.mid["lead"], f.u2)
+    bumped(f.lead, "member move")
+    bumped(f.lead2, "member move into unit")
+    bumped(f.sup, "member move out of supervisor scope")
+    env.rpc(f.admin, "move_unit", f.u1a, f.u2)      # supervisor of U1 loses U1a, lead2 (U2) gains it
+    bumped(f.sup, "unit move out of scope")
+    bumped(f.lead2, "unit move into scope")
+    bumped(f.mem, "unit move of own unit")
+    bumped(f.admin, "admin sees all moves")
+    # no change for an unrelated outsider
+    assert ep(f.outsider) == ep(f.outsider)
+
+
+# ---------------------------------------------------------------- concurrency
+@test
+def concurrency_opposing_unit_moves_cannot_create_a_cycle(env: Env) -> None:
+    f = fixture(env)
+    for attempt in range(3):
+        a = str(env.rpc(f.admin, "create_unit", f.root, f"A{attempt}")["data"]["unit_id"])
+        b = str(env.rpc(f.admin, "create_unit", f.root, f"B{attempt}")["data"]["unit_id"])
+        out: list[Any] = []
+        barrier = threading.Barrier(2)
+
+        def mv(x: str, y: str) -> None:
+            try:
+                barrier.wait()
+                out.append(env.rpc(f.admin, "move_unit", x, y))
+            except Exception as e:  # noqa: BLE001
+                out.append(e)
+
+        ts = [threading.Thread(target=mv, args=(a, b)), threading.Thread(target=mv, args=(b, a))]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        oks = [o for o in out if isinstance(o, dict)]
+        errs = [o for o in out if isinstance(o, TFError)]
+        assert len(oks) == 1 and len(errs) == 1 and errs[0].code == "cycle_detected", out
+        mutual = env.su("select count(*) from app.unit_closure x join app.unit_closure y on x.ancestor_id=y.descendant_id and x.descendant_id=y.ancestor_id where x.ancestor_id <> x.descendant_id")[0][0]
+        assert mutual == 0
+
+
+@test
+def concurrency_two_admins_cannot_demote_each_other(env: Env) -> None:
+    f = fixture(env)
+    env.rpc(f.admin, "set_member_role", f.mid["sup"], "admin")
+    for _attempt in range(3):
+        out: list[Any] = []
+        barrier = threading.Barrier(2)
+
+        def demote(who: str, target: str) -> None:
+            try:
+                barrier.wait()
+                out.append(env.rpc(who, "set_member_role", target, "member"))
+            except Exception as e:  # noqa: BLE001
+                out.append(e)
+
+        ts = [threading.Thread(target=demote, args=(f.admin, f.mid["sup"])),
+              threading.Thread(target=demote, args=(f.sup, f.mid["admin"]))]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        n = env.su("select count(*) from app.memberships where org_id=%s and role='admin' and status='active'", (f.org,))[0][0]
+        assert n >= 1, f"org left without an admin: {out}"
+        if n == 1:   # one succeeded; restore a second admin for the next round
+            env.su("update app.memberships set role='admin' where id in (%s,%s)", (f.mid["admin"], f.mid["sup"]))
+
+
+# ---------------------------------------------------------------- misc negative / regression
+@test
+def regression_server_controlled_columns_cannot_be_forged(env: Env) -> None:
+    f = fixture(env)
+    # row_version and change_xid are set by trigger even when a privileged writer tries to forge them
+    env.su("update app.org_units set name='n2', row_version=999, change_xid='1'::xid8 where id=%s", (f.u2,))
+    rv, cx = env.su("select row_version, change_xid::text::bigint from app.org_units where id=%s", (f.u2,))[0]
+    assert rv < 999 and cx > 1
+    # org_id / user_id are immutable on memberships
+    expect_pg(("TF004",), lambda: env.su("update app.memberships set user_id=%s where id=%s", (f.outsider, f.mid["mem"])))
+    # a single org per user
+    expect_pg(("23505",), lambda: env.su("insert into app.memberships (org_id,user_id,role,unit_id) values (%s,%s,'member',%s)", (f.org, f.mem, f.u1)))
+    # unit/membership org consistency (composite FK)
+    other_unit = str(env.su("select id from app.org_units where org_id<>%s limit 1", (f.org,))[0][0])
+    expect_pg(("23503",), lambda: env.su("update app.memberships set unit_id=%s where id=%s", (other_unit, f.mid["mem"])))
+
+
+@test
+def regression_service_role_cannot_use_private_helpers(env: Env) -> None:
+    f = fixture(env)
+    c = env.conn(f.mem)
+    cur = c.cursor()
+    expect_pg(("42501",), lambda: cur.execute("select app_private.emit_event(%s,null,'a.b','x',null)", (f.org,)))
+    c.rollback()
+    cur = env.conn(f.mem).cursor()
+    expect_pg(("42501",), lambda: cur.execute("select app_private.has_authority_over_membership(%s,%s)", (f.mid["admin"], f.mid["mem"])))
+
+
+@test
+def rls_same_rank_peers_in_one_unit_are_not_in_authority(env: Env) -> None:
+    f = fixture(env)
+    peer = env.user("peer@a.test", name="peer")
+    pm = join(env, f.admin, peer, "team_leader", f.u1a)
+    assert pm not in mids(env, f.lead) and f.mid["lead"] not in mids(env, peer)
+    assert {str(r[0]) for r in rows(env, f.lead, "select id from app.profiles")} == {f.lead, f.mem}
+    env.rpc(f.admin, "grant_permission", f.mid["lead"], "remove_members", f.u1a, FUTURE)
+    expect_tf("forbidden", lambda: env.rpc(f.lead, "set_member_status", pm, "removed"))   # peer, same rank
+    assert env.rpc(f.lead, "set_member_status", f.mid["mem"], "removed")["ok"]          # below rank, in scope, with grant
+
+
+@test
+def concurrency_admin_changes_serialize_on_org_admin_lock(env: Env) -> None:
+    """Deterministic: while one transaction holds an uncommitted admin demotion, a second admin
+    change in the same org must wait for it (it would otherwise pass its last-admin check blind)."""
+    f = fixture(env)
+    env.rpc(f.admin, "set_member_role", f.mid["sup"], "admin")
+    # raw statements (not RPCs) and the epoch trigger disabled (it upserts shared rows), so the only
+    # possible blocker is the org-admins advisory lock
+    env.su("alter table app.memberships disable trigger memberships_epoch")
+    c1 = env.conn()
+    cur1 = c1.cursor()
+    cur1.execute("update app.memberships set role='member' where id=%s", (f.mid["sup"],))   # holds the lock, uncommitted
+    c2 = env.conn()
+    cur2 = c2.cursor()
+    cur2.execute("set lock_timeout = '700ms'")
+    try:
+        cur2.execute("update app.memberships set role='member' where id=%s", (f.mid["admin"],))
+        raise AssertionError("second admin change did not wait for the org admin lock")
+    except psycopg2.Error as e:
+        assert e.pgcode == "55P03", e.pgcode
+    c2.rollback()
+    c1.commit()
+    assert env.su("select count(*) from app.memberships where org_id=%s and role='admin' and status='active'", (f.org,))[0][0] == 1
+
+
+@test
+def regression_suspended_actor_has_no_authority_or_scope(env: Env) -> None:
+    f = fixture(env)
+    assert env.su("select app_private.has_authority_over_membership(%s,%s)", (f.mid["lead"], f.mid["mem"]))[0][0] is True
+    assert env.su("select app_private.unit_in_scope(%s,%s)", (f.mid["lead"], f.u1a))[0][0] is True
+    env.rpc(f.admin, "set_member_status", f.mid["lead"], "suspended")
+    assert env.su("select app_private.has_authority_over_membership(%s,%s)", (f.mid["lead"], f.mid["mem"]))[0][0] is False
+    assert env.su("select app_private.unit_in_scope(%s,%s)", (f.mid["lead"], f.u1a))[0][0] is False
+    assert env.su("select app_private.has_authority_over_membership(%s,%s)", (f.mid["admin"], f.mid["mem"]))[0][0] is True
