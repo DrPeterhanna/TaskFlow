@@ -47,13 +47,19 @@ def update_checked_refuses_unseen_changes_and_never_overwrites(env: Env) -> None
     env.rpc(u, "create_personal_task", t, None, "Original", None)
     env.rpc(u, "update_personal_task", t, {"title": "Other device"})                      # another device got there first
     before = env.su("select title, planned_date, change_xid::text from app.personal_tasks where id = %s", (t,))
-    expect_tf("stale_conflict", lambda: env.rpc(u, "update_personal_task_checked", t, {"title": "Mine", "planned_date": "2026-12-01"}, {"title": "Original", "planned_date": None}))
+    r0 = env.rpc(u, "update_personal_task_checked", t, {"title": "Mine", "planned_date": "2026-12-01"}, {"title": "Original", "planned_date": None})
+    assert r0["ok"] is False and r0["code"] == "stale_conflict" and r0["current"] == {"title": "Other device"}, r0
     assert env.su("select title, planned_date, change_xid::text from app.personal_tasks where id = %s", (t,)) == before   # nothing applied, not even the unrelated field
     assert env.su("select count(*) from app.personal_events where kind = 'ptask.updated'")[0][0] == 1                    # only the other device's edit
-    # same refusal on resend of the same op while the values still differ (no receipt kept)
+    # the refusal is terminal: resend returns the same refusal, and it STILL does after the values change back to the base
     op = new_op()
-    for _ in range(2):
-        expect_tf("stale_conflict", lambda: env.rpc(u, "update_personal_task_checked", t, {"title": "Mine"}, {"title": "Original"}, op=op))
+    first = env.rpc(u, "update_personal_task_checked", t, {"title": "Mine"}, {"title": "Original"}, op=op)
+    assert first["ok"] is False and first["code"] == "stale_conflict"
+    assert env.rpc(u, "update_personal_task_checked", t, {"title": "Mine"}, {"title": "Original"}, op=op) == first
+    env.rpc(u, "update_personal_task", t, {"title": "Original"})                     # values change back to what the refused op expected
+    assert env.rpc(u, "update_personal_task_checked", t, {"title": "Mine"}, {"title": "Original"}, op=op) == first
+    assert env.su("select title from app.personal_tasks where id = %s", (t,)) == [("Original",)]   # the old op did NOT commit
+    env.rpc(u, "update_personal_task", t, {"title": "Other device"})
     # fresh op with a fresh base (the user saw "Other device" and chose to keep theirs) applies
     r = env.rpc(u, "update_personal_task_checked", t, {"title": "Mine"}, {"title": "Other device"})
     assert r["ok"] is True and r["data"]["overwritten"] == {}

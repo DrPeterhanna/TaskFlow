@@ -2,7 +2,7 @@
 -- for the fields it edits. Under the row lock, if ANY of those fields currently holds a different value (and not already the
 -- value being written) the server REFUSES with stale_conflict and changes nothing; the message carries the current values.
 -- The client keeps the user's intent, shows the conflict, and only a fresh operation with a fresh base can apply it.
--- A refused op leaves no receipt, so a resend is evaluated again (the same answer while the values still differ).
+-- The refusal is stored as the op's terminal result (receipt): a resend returns the same refusal, even if the values changed back.
 -- NOT part of the approved baseline: needs the user's approval before hosted use.
 create function app_api.update_personal_task_checked(p_op_id uuid, p_id uuid, p_patch jsonb, p_base jsonb)
 returns jsonb language plpgsql security definer
@@ -43,7 +43,10 @@ begin
     end loop;
   end if;
   if v_over <> '{}'::jsonb then
-    perform app_private.raise_tf('stale_conflict', v_over::text);
+    -- Terminal, idempotent refusal: returned as DATA and stored in the receipt, so this op_id can never commit later,
+    -- even if the values change back. Only a fresh op_id (explicit user resolution) can apply the change.
+    v_res := pg_catalog.jsonb_build_object('ok', false, 'code', 'stale_conflict', 'message', v_over::text, 'current', v_over);
+    return app_private.finish_op(p_op_id, v_res);
   end if;
   update app.personal_tasks set
     title = case when p_patch ? 'title' then p_patch ->> 'title' else title end,
