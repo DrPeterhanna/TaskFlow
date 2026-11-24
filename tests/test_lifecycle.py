@@ -287,3 +287,37 @@ def suspended_or_removed_actor_has_no_authority_at_any_layer(env: Env) -> None:
     expect_tf("forbidden", lambda: env.rpc(f.sup, "set_member_status", f.mid["mem"], "suspended"))
     assert env.rpc(f.admin, "set_member_status", f.mid["sup"], "removed")["ok"]
     assert env.su(q, (f.mid["sup"], f.mid["mem"], f.mid["sup"], f.u1a))[0] == (False, False)
+
+
+@test
+def suspended_admin_has_no_authority_helper_and_end_to_end(env: Env) -> None:
+    """The admin branch short-circuits the scope check, so only the status clause stops a suspended admin."""
+    f = fixture(env)
+    assert env.rpc(f.admin, "set_member_role", f.mid["sup"], "admin")["ok"]
+    q = "select app_private.has_authority_over_membership(%s, %s), app_private.unit_in_scope(%s, %s)"
+    assert env.su(q, (f.mid["sup"], f.mid["mem"], f.mid["sup"], f.u1a))[0] == (True, True)
+    assert env.rpc(f.admin, "set_member_status", f.mid["sup"], "suspended")["ok"]
+    assert env.su(q, (f.mid["sup"], f.mid["mem"], f.mid["sup"], f.u1a))[0] == (False, False)
+    expect_tf("forbidden", lambda: env.rpc(f.sup, "set_member_status", f.mid["mem"], "suspended"))
+    expect_tf("forbidden", lambda: env.rpc(f.sup, "create_unit", f.root, "x"))
+    assert {str(r[0]) for r in rows(env, f.sup, "select id from app.memberships")} == {f.mid["sup"]}
+    assert rows(env, f.sup, "select id from app.org_units") == []
+
+
+@test
+def admin_of_closed_org_may_be_deleted_and_soft_deleted_profile_cannot_authenticate(env: Env) -> None:
+    f = fixture(env)
+    env.su("update app.organizations set deleted_at = now() where id=%s", (f.org,))
+    delete_user(env, f.admin)                       # sole-admin exemption applies to a closed org
+    assert not user_exists(env, f.admin)
+    # defence in depth: a profile marked deleted while its Auth link is still set cannot authenticate
+    env.su("update app.profiles set deleted_at = now() where id=%s", (f.lead,))
+    expect_tf("unauthenticated", lambda: env.rpc(f.lead, "update_profile", {"theme": "dark"}))
+    assert rows(env, f.lead, "select id from app.personal_tasks") == []
+
+
+@test
+def my_membership_hides_a_soft_deleted_org_even_if_membership_row_is_active(env: Env) -> None:
+    f = fixture(env)
+    env.su("update app.organizations set deleted_at = now() where id=%s", (f.org,))
+    assert env.as_user(f.mem, "select app_api.my_membership()")[0][0]["data"]["membership"] is None
