@@ -73,7 +73,7 @@ create table app.personal_recurrence_rules (
   id uuid primary key,
   user_id uuid not null references app.profiles (id) on delete cascade,
   template jsonb not null,
-  weekdays smallint[] not null check (weekdays <@ array[0,1,2,3,4,5,6]::smallint[] and cardinality(weekdays) > 0),
+  weekdays smallint[] not null check (weekdays <@ array[0, 1, 2, 3, 4, 5, 6]::smallint[] and cardinality(weekdays) > 0),
   starts_on date not null,
   ends_on date,
   active boolean not null default true,
