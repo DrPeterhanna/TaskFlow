@@ -36,7 +36,7 @@ export function createOrgTasksApi(read: ReadCall, rpc: RpcClient) {
     list,
     create: (
       title: string,
-      unitId: string,
+      unitId: string | null,
       assigneeMembershipId: string | null = null,
       priority: OrgTaskPriority = 'normal',
       dueDate: string | null = null,
@@ -51,4 +51,5 @@ export function createOrgTasksApi(read: ReadCall, rpc: RpcClient) {
 }
 
 export type OrgTasksApi = ReturnType<typeof createOrgTasksApi>;
+
 

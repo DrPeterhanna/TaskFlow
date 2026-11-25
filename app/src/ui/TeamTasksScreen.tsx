@@ -55,21 +55,28 @@ export function TeamTasksScreen({
 
   const handleCreate = async () => {
     const clean = title.trim();
-    const targetUnit = selectedUnit || membership.unit_id || units[0]?.id;
-    if (!clean || !targetUnit || busy) return;
+    if (!clean) {
+      setError(ar ? 'اكتب عنوان المهمة أولاً' : 'Enter a task title first');
+      return;
+    }
+    if (busy) return;
+    const targetUnit = selectedUnit || membership.unit_id || units[0]?.id || null;
     const cleanDue = /^\d{4}-\d{2}-\d{2}$/.test(dueDate.trim()) ? dueDate.trim() : null;
     setBusy(true);
     setError(null);
     try {
       const r = await tasksApi.create(clean, targetUnit, selectedAssignee || membership.membership_id, priority, cleanDue);
-      if (r.ok) {
+      if (r && r.ok) {
         setTitle('');
         setDueDate('');
         setPriority('normal');
+        setFilter('open');
         await load();
       } else {
-        setError(r.message ?? (ar ? 'تعذر إنشاء المهمة' : 'Could not create task'));
+        setError((r && (r.message || r.code)) || (ar ? 'تعذر إنشاء المهمة' : 'Could not create task'));
       }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
@@ -390,3 +397,4 @@ const s = StyleSheet.create({
   badge: { borderRadius: radius.pill, paddingHorizontal: space.sm, paddingVertical: 2 },
   empty: { alignItems: 'center', gap: space.sm, marginTop: space.xxl, paddingHorizontal: space.xl },
 });
+

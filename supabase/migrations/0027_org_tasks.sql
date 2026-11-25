@@ -88,7 +88,7 @@ end $$;
 create or replace function app_api.create_org_task(
   p_op_id uuid,
   p_title text,
-  p_unit_id uuid,
+  p_unit_id uuid default null,
   p_assignee_membership_id uuid default null,
   p_priority text default 'normal',
   p_due_date date default null,
@@ -101,6 +101,7 @@ declare
   v_uid uuid := app_private.require_uid();
   v_me app.memberships;
   v_target app.memberships;
+  v_unit uuid;
   v_id uuid;
 begin
   select * into v_me from app.memberships where user_id = v_uid and status = 'active';
@@ -108,7 +109,11 @@ begin
     perform app_private.raise_tf('forbidden', 'active membership required');
   end if;
 
-  if not app_private.unit_in_scope(v_me.id, p_unit_id) then
+  v_unit := coalesce(p_unit_id, v_me.unit_id);
+  if v_unit is null then
+    select id into v_unit from app.org_units where org_id = v_me.org_id and deleted_at is null order by created_at asc limit 1;
+  end if;
+  if not app_private.unit_in_scope(v_me.id, v_unit) then
     perform app_private.raise_tf('forbidden', 'unit out of scope');
   end if;
 
@@ -127,7 +132,7 @@ begin
     org_id, unit_id, assignee_membership_id, created_by_membership_id,
     title, notes, priority, due_date
   ) values (
-    v_me.org_id, p_unit_id, coalesce(p_assignee_membership_id, v_me.id), v_me.id,
+    v_me.org_id, v_unit, coalesce(p_assignee_membership_id, v_me.id), v_me.id,
     btrim(p_title), nullif(btrim(coalesce(p_notes, '')), ''), coalesce(p_priority, 'normal'), p_due_date
   )
   returning id into v_id;
@@ -218,3 +223,4 @@ grant execute on function
   app_api.set_org_task_status(uuid, uuid, text),
   app_api.delete_org_task(uuid, uuid)
 to authenticated, service_role;
+
