@@ -1,6 +1,7 @@
 ﻿import type { RpcClient, RpcResult } from '../sync/types';
 import { uuidv7 } from '../sync/ids';
-import type { Listing, ReadCall } from './shellModel';
+import type { ReadCall } from './shellModel';
+import type { Listing } from './orgAdmin';
 
 export type OrgTaskPriority = 'low' | 'normal' | 'high' | 'urgent';
 export type OrgTaskStatus = 'todo' | 'in_progress' | 'done' | 'canceled';
@@ -50,3 +51,4 @@ export function createOrgTasksApi(read: ReadCall, rpc: RpcClient) {
 }
 
 export type OrgTasksApi = ReturnType<typeof createOrgTasksApi>;
+

@@ -18,7 +18,7 @@ import { Button, T } from './primitives';
 type Api = ReturnType<typeof createShellApi>;
 
 /** Signed-in navigation: auth -> verify email -> personal-first tabs. Organization onboarding is optional. The route is derived, never stored. */
-export function Shell({ auth, api, makeStore, locale, adminApi }: { auth: AuthController; api: Api; adminApi: OrgAdminApi; tasksApi?: OrgTasksApi; makeStore: (userId: string) => TaskStore; locale: Locale }) {
+export function Shell({ auth, api, makeStore, locale, adminApi, tasksApi }: { auth: AuthController; api: Api; adminApi: OrgAdminApi; tasksApi?: OrgTasksApi; makeStore: (userId: string) => TaskStore; locale: Locale }) {
   const a = useSyncExternalStore(auth.subscribe, auth.getState);
   const t = strings(locale);
   const th = useTheme();
@@ -90,4 +90,5 @@ export function Shell({ auth, api, makeStore, locale, adminApi }: { auth: AuthCo
     </View>
   );
 }
+
 
