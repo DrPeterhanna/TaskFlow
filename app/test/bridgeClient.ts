@@ -1,0 +1,38 @@
+import { spawn, type ChildProcess } from 'node:child_process';
+import { createInterface } from 'node:readline';
+import { TransportError, type PullPage, type RpcClient, type RpcResult } from '../src/sync/index.js';
+
+/** TEST ONLY: talks to tests/bridge.py (local PostgreSQL, not Supabase). */
+export class Bridge {
+  proc!: ChildProcess;
+  base = '';
+  async start(): Promise<void> {
+    this.proc = spawn('python3', ['../tests/bridge.py'], { env: process.env, stdio: ['ignore', 'pipe', 'inherit'] });
+    const rl = createInterface({ input: this.proc.stdout! });
+    this.base = await new Promise<string>((res, rej) => {
+      const t = setTimeout(() => rej(new Error('bridge start timeout')), 60_000);
+      rl.on('line', (l) => { const m = /^READY (\d+)/.exec(l); if (m) { clearTimeout(t); res(`http://127.0.0.1:${m[1]}`); } });
+      this.proc.on('exit', () => rej(new Error('bridge exited')));
+    });
+  }
+  async stop(): Promise<void> { if (!this.proc || this.proc.exitCode !== null) return; const exited = new Promise<void>(r => this.proc.once('exit', () => r())); this.proc.kill('SIGTERM'); await exited; }
+  async post(path: string, body: unknown): Promise<any> {
+    const r = await fetch(this.base + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const j = await r.json();
+    if (r.status === 400 && j.sqlstate) return { ok: false, code: 'rejected_by_server', message: j.error, sqlstate: j.sqlstate };   // mirrors createRpcClientFrom
+    if (r.status === 404 && j.pgcode === '42883') return { ok: false, code: 'unsupported', message: j.error };   // mirrors createRpcClientFrom
+    if (!r.ok) throw new TransportError(`${r.status} ${JSON.stringify(j)}`, r.status === 401 ? 'unauthorized' : 'server');
+    return j;
+  }
+  user(email: string): Promise<string> { return this.post('/user', { email }).then((j) => j.id as string); }
+  sql(query: string): Promise<unknown[][]> { return this.post('/sql', { query }).then((j) => j.rows as unknown[][]); }
+  dropNextResponses(n: number): Promise<unknown> { return this.post('/fault', { drop: n }); }
+  client(uid: string): RpcClient {
+    return {
+      call: async (rpc, args, opId) => (await this.post('/rpc', { uid, fn: rpc, args, op: opId })) as RpcResult,
+      pull: async (stream, afterXid, afterId, horizon, limit) =>
+        (await this.post('/pull', { uid, stream, after_xid: afterXid, after_id: afterId, horizon, limit })) as PullPage,
+      status: async (stream, afterXid) => ((await this.post('/status', { uid, stream, after_xid: afterXid })) as { data: { full_resync_required: boolean; floor_xid: string } }).data,
+    };
+  }
+}

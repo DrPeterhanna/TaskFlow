@@ -1,0 +1,62 @@
+> Implementation evidence update, November24: earlier unconditional-mutation/implementation-status text below is historical where it conflicts with docs/OFFLINE_SYNC_EXECUTION.md and docs/OFFLINE_RETENTION_SECURITY.md. Checked RPCs exist in local0019–0020; local0021–0024hardening is feature-branch-only. No hosted/native readiness is implied.
+
+# Offline Sync & Recovery: living status list
+Last updated at the commit that contains this file. All evidence is LOCAL (local PostgreSQL 16 + auth shim, node/browser SQLite, headless Chrome). Hosted Supabase: none. Device: none.
+
+## 1. Implemented
+- Durable outbox (SQLite), FIFO, same op_id on every retry, exponential backoff with full jitter (2 s base, 5 min cap), inflight recovery at startup.
+- Server idempotency receipts (90 days), op expiry, args-hash mismatch refusal.
+- Pull with per-page atomic cursor, horizon pinning, skipped-row rewind after local ops settle (fixes the stale-after-reject defect).
+- NO SILENT OVERWRITE for edits (0019 `update_personal_task_checked`, base REQUIRED): under the row lock the server REFUSES (stale_conflict) if any edited field holds a value the device had not seen, and changes nothing. The device keeps the user's intent in the inbox: "Apply my change anyway" pulls the other value first and queues a FRESH op whose base is that value (the server re-checks atomically, so a further intervening edit is refused again); "Use the other value" discards. A resend of a refused op is evaluated again. There is NO fallback to the unchecked update: on a server without 0019 the op stays queued, same op_id, and the panel says the server needs an update.
+- Remote delete during a local edit: refused by the server, shown to the user.
+- Full resync via `sync_status` (0017), keeps unsent work.
+- Recovery UI: status chip, Sync panel (queued count, retry countdown only when truly waiting to retry, last full sync), Try now, Re-download, rejected inbox (Try again / Discard), conflict inbox (Restore other value / Keep mine / OK). EN and AR.
+- Poison-op protection: DB constraint errors become visible rejections; missing server function falls back.
+- 0018: completing a deleted task refused.
+
+## 2. Verified scenarios (local)
+See docs/TEST_RESULTS.txt for counts. Scenarios: offline write and flush; restart with queued ops; kill mid-send then replay (applied once); lost response; same op_id x3 in parallel; same op_id with different args; 5 offline edits plus one lost response; rejected op in the middle does not block later ops; stale-pull-after-reject; remote delete during edit; edit/edit same field (server-reported, even when no pull happened in between); edit/edit different fields; stale device edit; mid-pull crash resume; cursor below floor; forged ops on another user's task; server-controlled fields in a patch; 90-day-old op; tampered cursor.
+
+## 3. Remaining failures / gaps (NOT done)
+1. Conflict audit is incomplete. Only UPDATE is conditional. complete, reopen and delete from a stale device are still applied unconditionally (for example deleting a task another device just edited). They need conditional versions (base row_version) with the same refusal and fresh-op resolution, plus deterministic tests. NOT DONE.
+1b. Baseline dependence: without 0019 no edit can sync (by design). On the baseline set (0001-0013 + 0017) 8 vitest edit tests fail for that reason. So edit-sync verification depends on 0019 (unapproved, not on 0014).
+2. Reassignment, role changes and org streams are not synced offline, so conflicts there are untested by design.
+3. No retention/purge mechanism is built. Required design (not done): tombstones, op receipts and old-op replay must be bounded together; the watermark must be a proven cursor position (snapshot/transaction ordering), not 'highest purged change_xid'; unsent local work must be preserved and a purged delete must never be resurrected by a full resync. Only the client reaction to a floor that was set by hand is tested. The 0010 architecture schedules the purge for a later phase; Peter has now asked for a safe design in this phase.
+4. Authorization after revocation: personal-space ops depend only on the signed-in user. Tests for a suspended or role-changed org member exist at server level (test_phase2) but there is no client-queue test, because org operations are online-only. A removed/deleted account (0014, unapproved) with a queued personal op is untested.
+5. No title-edit screen; conflicts can only arise today from complete/reopen/delete and the repo update API.
+6. Restart: a REAL OS process (SIGKILL) was killed during an active push on a file-backed node SQLite; the next process recovered the inflight op with the same op_id and applied both ops once (restart.test). Still untested: expo-sqlite and native OS termination (device scope).
+7. The browser UI tests cover reject and discard; conflict "Restore other value" is covered by the store test, not by a browser test.
+
+## 4. Unverified assumptions
+- expo-sqlite behaves like node SQLite for transactions and file durability.
+- PostgREST maps TFxxx and SQLSTATE errors as the bridge and mocks assume (partly checked by postgrest_local, 13 checks, not for the new RPCs).
+- 0017 and 0019 are not exercised through PostgREST/RLS under real roles.
+- Real JWT expiry, token refresh and 401 behaviour.
+
+## 5. Production risks
+- 0015-0019 are unapplied everywhere hosted and need approval. Without 0019 conflict reporting falls back to client-side best effort.
+- `create_personal_task` lets a raw CHECK error escape for an empty title (handled client side).
+- Tombstones grow without a purge job (no correctness risk yet; storage only).
+- Last-writer-wins remains the final rule for the winning value; the user is told, and can restore.
+
+## Needs real Supabase or a device (cannot be done locally)
+Hosted RLS and role behaviour, PostgREST error mapping for 0017/0019, JWT expiry, hosted migration application, expo-sqlite durability, OS background kill, connectivity events. No credentials are requested now.
+
+## Session token storage and credential history (updated)
+- Session tokens now use expo-secure-store (Keychain/Keystore) through a chunking adapter (app/src/supabase/secureStorage.ts). Adapter tests (4) cover large values, shrink, torn write reads as signed out, corruption. Verified against an in-memory backend only. Real Keychain/Keystore behaviour, backup exclusion and migration of old AsyncStorage sessions: device scope, unverified.
+- Correction: the database credential saved in the vault WAS used earlier for the authorised production migrations 0001-0013 (about 12:30, before the hold). It is held now and not used further. Earlier notes calling it unused were wrong.
+- Auth storage hardening (safeAuthStorage): per-key serialised operations, one-time move of a legacy AsyncStorage session into secure storage (plain copy removed only after the secure copy reads back identical, kept if the secure write fails). 4 tests, in-memory backends. expo install --check: "Dependencies are up to date" for the Expo SDK in package.json. Native Keychain/Keystore, backup behaviour: device scope.
+## Peter's 14:24 security requirements: status (nothing done beyond item 1 yet)
+1 secure storage: done locally (above). 2 auth persistence/refresh/expiry/logout/restart tests: TODO. 3 RLS review of every sync table: TODO. 4 SECURITY DEFINER audit (authz, search_path, privileges): TODO. 5 server-side target validation before migrations (not client-only): TODO. 6 DONE locally (4 tests): suspended/removed members get no org_units rows even with an old cursor and regain them when reinstated; grant revocation, suspension and removal stop org writes at once; an op authorised before revocation replays identically while a new op is refused; personal streams stay owner-only (org suspension does not change a user's own personal data, by design). Org ops are online-only. A queued personal op after ACCOUNT removal depends on unapproved 0014: untested. Role-change: roles don't gate create_unit (grants do), so the test uses grants. 7 separate prod/test credentials: documented, enforced client-side only. Migration review package (SQL files, objects, destructive?, rollback, DB privileges, postflight): TODO.
+## Replay after revocation and deleted accounts (local PG + auth shim, tests/test_security_audit.py)
+- Receipt replay runs BEFORE the authorisation check (begin_op returns the stored result), by design, so a retry of an op that WAS authorised is idempotent. Safe response: the caller only ever gets their own previous result (ids/flags), nothing is mutated again (invitation/event counts asserted unchanged), and create_invitation withholds the re-derived code once the creator is no longer an active member (0011 logic, tested). A NEW op after revocation is refused. Receipts never store codes (asserted).
+- Deleted auth user with a still-valid token: reads nothing, writes refused, on the approved baseline (empty account: 14/14 audit tests pass on baseline 0001-0013+0017 AND on all migrations). A write by the deleted user is refused by the database (FK violation on op_receipts, class 23, which the client maps to rejected_by_server).
+- Account with personal history: on the baseline, deleting the auth user is BLOCKED by the append-only personal_events trigger ("events are append-only"), nothing half-deleted. That is an existing limitation, stated, not fixed; 0014 (unapproved) detaches the profile instead.
+- Manual definer-logic review: NOT done yet. Catalog tests prove search_path, grants, RLS and invoker/definer shape only.
+- Counts: all migrations 81/81; baseline 14/14 audit tests; the baseline total still has the same 18 pre-existing failures that need 0014/0015/0016/0018/0019 (needs one full baseline rerun to restate).
+## 0020 conditional complete / reopen / delete (local only, unapplied, needs approval before hosted use)
+- Server (supabase/migrations/0020): complete and reopen carry the status the device saw; delete carries the row_version it saw and, when safe, a fingerprint of the live subtree. A mismatch is refused BEFORE any change as a terminal stored result (same op_id never commits later, even if values change back); an already-reached goal (done, todo, deleted) is an idempotent success. 0019/0020 success results carry rv_before/rv (row_version chain).
+- Client: repo.complete/reopen/remove send the checked calls. The engine moves a queued delete's base over the device's OWN acknowledged ops (create counts 0 -> 1) and poisons it (-1) if a foreign edit landed in between, so the server refuses. "Apply mine anyway" pulls first and queues a FRESH op built from the pulled state. No fallback to the old unchecked calls: a server without 0020 leaves the op queued (server_update_required).
+- Consequence for approval: edit, complete, reopen and delete from this client now REQUIRE 0019 + 0020 (plus 0017/0018). On the 0001-0013 baseline these ops stay queued and the panel says the server needs an update.
+- Tests (local only): run.py all migrations 85/85 (4 new server tests); vitest 141/141 (6 new real-PG tests in e2e_checked_mutations: delete vs remote edit and fresh-op resolution, terminal refusal when values change back, own ops chain not mistaken for conflict, foreign edit between own ops refused, complete vs remote cancel and fresh-op resolution, already-deleted idempotent).
+- Known limits: the subtree fingerprint is sent only when the whole subtree is server-confirmed and the task has no earlier queued ops of this device; otherwise only the task's own row_version is checked, so a remote edit of a SUBTASK can be deleted with its parent in that case. Restore, reorder and other still-unconditional calls are not used by this client. No browser screenshot yet of the delete/complete conflict copy. Mutants for 0019/0020 and the chain logic are not run.

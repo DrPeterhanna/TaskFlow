@@ -1,0 +1,180 @@
+{
+ "add_personal_dependency": [
+  "p_op_id",
+  "p_task_id",
+  "p_blocked_by"
+ ],
+ "clear_personal_recurrence": [
+  "p_op_id",
+  "p_id"
+ ],
+ "close_organization": [
+  "p_op_id"
+ ],
+ "complete_personal_task": [
+  "p_op_id",
+  "p_id"
+ ],
+ "complete_personal_task_checked": [
+  "p_op_id",
+  "p_id",
+  "p_base"
+ ],
+ "create_invitation": [
+  "p_op_id",
+  "p_role",
+  "p_unit_id",
+  "p_max_uses",
+  "p_expires_at"
+ ],
+ "create_organization": [
+  "p_op_id",
+  "p_name",
+  "p_timezone"
+ ],
+ "create_personal_note": [
+  "p_op_id",
+  "p_id",
+  "p_body"
+ ],
+ "create_personal_task": [
+  "p_op_id",
+  "p_id",
+  "p_parent_id",
+  "p_title",
+  "p_planned_date"
+ ],
+ "create_unit": [
+  "p_op_id",
+  "p_parent_id",
+  "p_name"
+ ],
+ "current_epoch": [],
+ "delete_personal_note": [
+  "p_op_id",
+  "p_id"
+ ],
+ "delete_personal_task": [
+  "p_op_id",
+  "p_id"
+ ],
+ "delete_personal_task_checked": [
+  "p_op_id",
+  "p_id",
+  "p_base"
+ ],
+ "grant_permission": [
+  "p_op_id",
+  "p_membership_id",
+  "p_permission",
+  "p_scope_unit_id",
+  "p_expires_at"
+ ],
+ "leave_organization": [
+  "p_op_id"
+ ],
+ "move_member": [
+  "p_op_id",
+  "p_membership_id",
+  "p_unit_id"
+ ],
+ "move_unit": [
+  "p_op_id",
+  "p_unit_id",
+  "p_new_parent_id"
+ ],
+ "redeem_invitation": [
+  "p_op_id",
+  "p_code"
+ ],
+ "remove_personal_dependency": [
+  "p_op_id",
+  "p_task_id",
+  "p_blocked_by"
+ ],
+ "rename_unit": [
+  "p_op_id",
+  "p_unit_id",
+  "p_name"
+ ],
+ "reopen_personal_task": [
+  "p_op_id",
+  "p_id"
+ ],
+ "reopen_personal_task_checked": [
+  "p_op_id",
+  "p_id",
+  "p_base"
+ ],
+ "reorder_personal_task": [
+  "p_op_id",
+  "p_id",
+  "p_sort_key"
+ ],
+ "restore_personal_task": [
+  "p_op_id",
+  "p_id"
+ ],
+ "revoke_invitation": [
+  "p_op_id",
+  "p_invitation_id"
+ ],
+ "revoke_permission": [
+  "p_op_id",
+  "p_grant_id"
+ ],
+ "rotate_invitation_code": [
+  "p_op_id",
+  "p_invitation_id"
+ ],
+ "set_member_role": [
+  "p_op_id",
+  "p_membership_id",
+  "p_role"
+ ],
+ "set_member_status": [
+  "p_op_id",
+  "p_membership_id",
+  "p_status"
+ ],
+ "set_personal_recurrence": [
+  "p_op_id",
+  "p_id",
+  "p_template",
+  "p_weekdays",
+  "p_starts_on",
+  "p_ends_on"
+ ],
+ "sync_pull": [
+  "p_stream",
+  "p_after_xid",
+  "p_after_id",
+  "p_horizon",
+  "p_limit"
+ ],
+ "sync_status": [
+  "p_stream",
+  "p_after_xid"
+ ],
+ "update_personal_note": [
+  "p_op_id",
+  "p_id",
+  "p_body",
+  "p_pinned"
+ ],
+ "update_personal_task": [
+  "p_op_id",
+  "p_id",
+  "p_patch"
+ ],
+ "update_personal_task_checked": [
+  "p_op_id",
+  "p_id",
+  "p_patch",
+  "p_base"
+ ],
+ "update_profile": [
+  "p_op_id",
+  "p_patch"
+ ]
+}

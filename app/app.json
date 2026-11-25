@@ -1,0 +1,13 @@
+{
+  "expo": {
+    "name": "TaskFlow",
+    "slug": "taskflow",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "ios": { "supportsTablet": false, "bundleIdentifier": "app.taskflow.placeholder" },
+    "android": { "package": "app.taskflow.placeholder" },
+    "web": { "bundler": "metro", "output": "single" },
+    "plugins": ["expo-sqlite"]
+  }
+}

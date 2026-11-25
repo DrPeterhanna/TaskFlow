@@ -1,0 +1,123 @@
+import { uuidv7 } from './ids';
+import type { Clock, OutboxOp, SqlDriver } from './types';
+import { systemClock } from './types';
+
+export interface EnqueueInput {
+  rpc: string;
+  entityType: string;
+  entityId: string;
+  args: unknown[];
+  dependsOnSeq?: number | null;
+  opId?: string;
+}
+
+/** Retry delay: 2 s base, doubling, full jitter, capped at 5 min. Never gives up on transport errors. */
+export function backoffMs(attempts: number, rand: () => number = Math.random): number {
+  const cap = Math.min(300_000, 2000 * 2 ** Math.max(0, attempts - 1));
+  return Math.floor(rand() * cap);
+}
+
+export class Outbox {
+  constructor(private db: SqlDriver, private clock: Clock = systemClock) {}
+
+  /** Must be called inside the same transaction as the optimistic local write. */
+  enqueue(i: EnqueueInput): OutboxOp {
+    const opId = i.opId ?? uuidv7(this.clock.now());
+    this.db.run(
+      `insert into outbox (op_id, rpc, entity_type, entity_id, args_json, created_at, depends_on_seq)
+       values (?,?,?,?,?,?,?)`,
+      [opId, i.rpc, i.entityType, i.entityId, JSON.stringify(i.args), this.clock.now(), i.dependsOnSeq ?? null],
+    );
+    return this.byOpId(opId)!;
+  }
+
+  byOpId(opId: string): OutboxOp | undefined {
+    return this.db.all<OutboxOp>('select * from outbox where op_id = ?', [opId])[0];
+  }
+
+  /** Crash recovery: inflight ops from a previous run go back to queued, SAME op_id (server replays). */
+  recoverInflight(): number {
+    return this.db.run("update outbox set state = 'queued' where state = 'inflight'").changes;
+  }
+
+  /** Next op eligible now: strict FIFO among queued ops; an op whose dependency is unresolved is skipped. */
+  next(): OutboxOp | undefined {
+    const now = this.clock.now();
+    const head = this.db.all<OutboxOp>("select * from outbox where state = 'queued' order by seq limit 1")[0];
+    if (!head || head.next_attempt_at > now) return undefined;
+    if (head.depends_on_seq !== null) {
+      const dep = this.db.all<{ state: string }>('select state from outbox where seq = ?', [head.depends_on_seq])[0];
+      if (dep && dep.state !== 'acked') return undefined;
+    }
+    return head;
+  }
+
+  markInflight(seq: number): void {
+    this.db.run("update outbox set state = 'inflight', attempts = attempts + 1, transmitted_json = coalesce(transmitted_json, args_json) where seq = ?", [seq]);
+  }
+  ack(seq: number): void {
+    this.db.run("update outbox set state = 'acked', error_code = null where seq = ?", [seq]);
+  }
+  /** Business rejection: no retry. Dependents are rejected too so nothing silently disappears. */
+  reject(seq: number, code: string, message?: string): OutboxOp[] {
+    this.db.run("update outbox set state = 'rejected', error_code = ?, error_message = ? where seq = ?", [code, message ?? null, seq]);
+    const hit = [seq];
+    let frontier = [seq];
+    while (frontier.length) {
+      const kids = this.db.all<{ seq: number }>(
+        `select seq from outbox where depends_on_seq in (${frontier.map(() => '?').join(',')}) and state in ('queued','inflight')`,
+        frontier,
+      );
+      frontier = kids.map((k) => k.seq);
+      hit.push(...frontier);
+      for (const k of frontier) {
+        this.db.run("update outbox set state = 'rejected', error_code = 'dependency_rejected' where seq = ?", [k]);
+      }
+    }
+    return hit.map((s) => this.db.all<OutboxOp>('select * from outbox where seq = ?', [s])[0]!);
+  }
+  hasLiveOps(entityType: string, entityId: string): boolean {
+    return this.db.all("select 1 as x from outbox where entity_type = ? and entity_id = ? and state in ('queued','inflight')", [entityType, entityId]).length > 0;
+  }
+  retryLater(seq: number, delayMs: number): void {
+    this.db.run("update outbox set state = 'queued', next_attempt_at = ? where seq = ?", [this.clock.now() + delayMs, seq]);
+  }
+  counts(): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const r of this.db.all<{ state: string; n: number }>('select state, count(*) as n from outbox group by state')) out[r.state] = Number(r.n);
+    return out;
+  }
+  /** Recovery: re-queue a rejected op (same op_id) together with the dependents that were rejected only because of it. */
+  retryRejected(seq: number): boolean {
+    const op = this.db.all<OutboxOp>("select * from outbox where seq = ? and state = 'rejected'", [seq])[0];
+    if (!op || op.error_code === 'dependency_rejected' || op.error_code === 'op_expired' || op.error_code === 'stale_conflict') return false;
+    let frontier = [seq];
+    const all = [seq];
+    while (frontier.length) {
+      const kids = this.db.all<{ seq: number }>(
+        `select seq from outbox where depends_on_seq in (${frontier.map(() => '?').join(',')}) and state = 'rejected' and error_code = 'dependency_rejected'`, frontier);
+      frontier = kids.map((k) => k.seq); all.push(...frontier);
+    }
+    for (const s of all) this.db.run("update outbox set state = 'queued', error_code = null, error_message = null, attempts = 0, next_attempt_at = 0 where seq = ?", [s]);
+    return true;
+  }
+  /** Recovery: the user accepts the loss of a rejected op (and of dependents rejected because of it). */
+  discardRejected(seq: number): number {
+    let frontier = [seq]; const all = [seq];
+    while (frontier.length) {
+      const kids = this.db.all<{ seq: number }>(
+        `select seq from outbox where depends_on_seq in (${frontier.map(() => '?').join(',')}) and state = 'rejected' and error_code = 'dependency_rejected'`, frontier);
+      frontier = kids.map((k) => k.seq); all.push(...frontier);
+    }
+    return all.reduce((n, s) => n + this.db.run("update outbox set state = 'dead' where seq = ? and state = 'rejected'", [s]).changes, 0);
+  }
+  /** Earliest time a queued op becomes due again (null when nothing is waiting). */
+  nextDueAt(): number | null {
+    const r = this.db.all<{ t: number | null }>("select min(next_attempt_at) as t from outbox where state = 'queued'")[0];
+    return r?.t === null || r?.t === undefined ? null : Number(r.t);
+  }
+  /** Rows the user must see in the Sync Inbox. */
+  rejected(): OutboxOp[] {
+    return this.db.all<OutboxOp>("select * from outbox where state = 'rejected' order by seq");
+  }
+}

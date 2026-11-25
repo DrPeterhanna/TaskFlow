@@ -1,0 +1,8 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true, "noUncheckedIndexedAccess": true, "skipLibCheck": true, "noEmit": true,
+    "types": ["node"], "moduleResolution": "Bundler", "module": "ESNext", "jsx": "react-jsx"
+  },
+  "include": ["src", "test", "App.tsx", "index.ts"]
+}

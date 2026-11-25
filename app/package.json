@@ -1,0 +1,44 @@
+{
+  "name": "taskflow-app",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-sqlite --no-warnings ./node_modules/vitest/vitest.mjs run",
+    "typecheck": "tsc --noEmit",
+    "test:unit": "node scripts/test-unit.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "typescript": "~6.0.3",
+    "vitest": "^5.1.1"
+  },
+  "dependencies": {
+    "@expo-google-fonts/cairo": "^0.4.2",
+    "@expo/metro-runtime": "^58.0.17",
+    "@react-native-async-storage/async-storage": "^2.2.0",
+    "@supabase/supabase-js": "^2.119.2",
+    "expo": "^58.0.26",
+    "expo-crypto": "^58.0.8",
+    "expo-font": "^58.0.12",
+    "expo-secure-store": "^58.0.3",
+    "expo-sqlite": "^58.0.18",
+    "expo-status-bar": "^58.0.5",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "react-native": "^0.88.1",
+    "react-native-url-polyfill": "^4.0.0",
+    "react-native-web": "^0.21.4",
+    "sql.js": "^1.17.0"
+  },
+  "expo": {
+    "autolinking": {
+      "android": {
+        "buildFromSource": [
+          ".*"
+        ]
+      }
+    }
+  }
+}
