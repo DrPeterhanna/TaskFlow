@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState, useRef, useSyncExternalStore } from 'react';
+﻿import React, { useCallback, useEffect, useState, useRef, useSyncExternalStore } from 'react';
 import { ActivityIndicator, AppState, Pressable, View } from 'react-native';
 import type { AuthController } from '../auth/authController';
 import { useTheme } from '../design/ThemeContext';
@@ -10,19 +10,21 @@ import { AuthScreen, Screen } from './AuthScreens';
 import { OrgGateScreen } from './OrgScreens';
 import { OrgManage } from './OrgManage';
 import type { OrgAdminApi } from '../shell/orgAdmin';
+import type { OrgTasksApi } from '../shell/orgTasks';
+import { TeamTasksScreen } from './TeamTasksScreen';
 import { PersonalTasksScreen } from './PersonalTasksScreen';
 import { Button, T } from './primitives';
 
 type Api = ReturnType<typeof createShellApi>;
 
 /** Signed-in navigation: auth -> verify email -> personal-first tabs. Organization onboarding is optional. The route is derived, never stored. */
-export function Shell({ auth, api, makeStore, locale, adminApi }: { auth: AuthController; api: Api; adminApi: OrgAdminApi; makeStore: (userId: string) => TaskStore; locale: Locale }) {
+export function Shell({ auth, api, makeStore, locale, adminApi }: { auth: AuthController; api: Api; adminApi: OrgAdminApi; tasksApi?: OrgTasksApi; makeStore: (userId: string) => TaskStore; locale: Locale }) {
   const a = useSyncExternalStore(auth.subscribe, auth.getState);
   const t = strings(locale);
   const th = useTheme();
   const [meEntry, setMeEntry] = useState<{ owner: string | null; me: Me } | null>(null);
   const [err, setErr] = useState<ShellError | null>(null);
-  const [tab, setTab] = useState<'tasks' | 'org'>('tasks');
+  const [tab, setTab] = useState<'tasks' | 'team' | 'org'>('tasks');
   const [storageFailed, setStorageFailed] = useState(false);
   const [storeEntry, setStoreEntry] = useState<{owner: string; store: TaskStore} | null>(null);
   const uid = a.session?.userId ?? null;
@@ -50,9 +52,9 @@ export function Shell({ auth, api, makeStore, locale, adminApi }: { auth: AuthCo
     return () => { sub.remove(); clearInterval(interval); };
   }, [store]);
 
-  if (storageFailed && uid) return <Screen locale={locale}><T>{locale === 'ar' ? 'تعذر فتح التخزين المحلي. لم يتم حذف البيانات. أعد تشغيل التطبيق أو اطلب المساعدة.' : 'Cannot open local storage. No data was deleted. Restart the app or ask for help.'}</T><Button label={t.auth.signOut} onPress={() => void auth.signOut().catch(() => undefined)} /></Screen>;
+  if (storageFailed && uid) return <Screen locale={locale}><T>{locale === 'ar' ? 'ØªØ¹Ø°Ø± ÙØªØ­ Ø§Ù„ØªØ®Ø²ÙŠÙ† Ø§Ù„Ù…Ø­Ù„ÙŠ. Ù„Ù… ÙŠØªÙ… Ø­Ø°Ù Ø§Ù„Ø¨ÙŠØ§Ù†Ø§Øª. Ø£Ø¹Ø¯ ØªØ´ØºÙŠÙ„ Ø§Ù„ØªØ·Ø¨ÙŠÙ‚ Ø£Ùˆ Ø§Ø·Ù„Ø¨ Ø§Ù„Ù…Ø³Ø§Ø¹Ø¯Ø©.' : 'Cannot open local storage. No data was deleted. Restart the app or ask for help.'}</T><Button label={t.auth.signOut} onPress={() => void auth.signOut().catch(() => undefined)} /></Screen>;
   const route = routeFor(a.phase, me, err);
-  if (a.phase === 'signedIn' && a.session?.localOnly && store) return <Screen locale={locale}><PersonalTasksScreen store={store} locale={locale} /><T>{locale === 'ar' ? 'مساحة محلية فقط. ستعود المزامنة بعد تجديد الجلسة عند الاتصال.' : 'Local workspace only. Sync resumes after the session refreshes online.'}</T><Button label={t.org.retry} onPress={() => void refresh()} /><Button label={t.auth.signOut} onPress={() => void auth.signOut().catch(() => undefined)} /></Screen>;
+  if (a.phase === 'signedIn' && a.session?.localOnly && store) return <Screen locale={locale}><PersonalTasksScreen store={store} locale={locale} /><T>{locale === 'ar' ? 'Ù…Ø³Ø§Ø­Ø© Ù…Ø­Ù„ÙŠØ© ÙÙ‚Ø·. Ø³ØªØ¹ÙˆØ¯ Ø§Ù„Ù…Ø²Ø§Ù…Ù†Ø© Ø¨Ø¹Ø¯ ØªØ¬Ø¯ÙŠØ¯ Ø§Ù„Ø¬Ù„Ø³Ø© Ø¹Ù†Ø¯ Ø§Ù„Ø§ØªØµØ§Ù„.' : 'Local workspace only. Sync resumes after the session refreshes online.'}</T><Button label={t.org.retry} onPress={() => void refresh()} /><Button label={t.auth.signOut} onPress={() => void auth.signOut().catch(() => undefined)} /></Screen>;
   if (route === 'loading' && a.phase === 'signedIn' && store) return <Screen locale={locale}><PersonalTasksScreen store={store} locale={locale} /><Button label={t.org.retry} onPress={() => void refresh()} /><Button label={t.auth.signOut} onPress={() => void auth.signOut().catch(() => undefined)} /></Screen>;
   if (route === 'loading') return <Screen locale={locale}><ActivityIndicator accessibilityLabel={t.loading} /></Screen>;
   if (route === 'auth') return <AuthScreen auth={auth} locale={locale} />;
@@ -72,13 +74,14 @@ export function Shell({ auth, api, makeStore, locale, adminApi }: { auth: AuthCo
     <View style={{ flex: 1, backgroundColor: th.bg }}>
       <View style={{ flex: 1 }}>
         {tab === 'tasks' && store ? <PersonalTasksScreen store={store} locale={locale} />
+          : tab === 'team' && m && tasksApi ? <TeamTasksScreen locale={locale} membership={m} tasksApi={tasksApi} adminApi={adminApi} />
           : m ? <OrgManage locale={locale} membership={m} email={a.session?.email ?? ''} api={adminApi} onSignOut={() => void auth.signOut().catch(() => undefined)} onLeft={() => void refresh()} />
           : <OrgGateScreen locale={locale} onSignOut={() => void auth.signOut().catch(() => undefined)}
               onCreate={async n => { const r = await api.createOrg(n, Intl.DateTimeFormat().resolvedOptions().timeZone || 'Africa/Cairo'); if (r.ok) await refresh(); return r; }}
               onJoin={async c => { const r = await api.joinOrg(c); if (r.ok) await refresh(); return r; }} />}
       </View>
       <View accessibilityRole="tablist" style={{ flexDirection: 'row', borderTopWidth: 1, borderColor: th.border, backgroundColor: th.surface }}>
-        {([['tasks', t.org.tabTasks], ['org', t.org.tabOrg]] as const).map(([k, label]) => (
+        {([['tasks', t.org.tabTasks], ...(m && tasksApi ? [['team', locale === 'ar' ? 'الفريق' : 'Team'] as const] : []), ['org', t.org.tabOrg]] as const).map(([k, label]) => (
           <Pressable key={k} accessibilityRole="tab" accessibilityState={{ selected: tab === k }} accessibilityLabel={label} onPress={() => setTab(k)}
             style={{ flex: 1, minHeight: minTouch + space.md, alignItems: 'center', justifyContent: 'center', borderTopWidth: 3, borderColor: tab === k ? th.primary : 'transparent' }}>
             <T weight={tab === k ? 700 : 500} color={tab === k ? th.primary : th.textMuted}>{label}</T>
@@ -87,3 +90,4 @@ export function Shell({ auth, api, makeStore, locale, adminApi }: { auth: AuthCo
     </View>
   );
 }
+

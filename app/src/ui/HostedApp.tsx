@@ -1,8 +1,9 @@
-import { AppState } from 'react-native';
+﻿import { AppState } from 'react-native';
 import { accountBoundRpc } from '../store/accountLifecycle';
 import React, { useEffect, useMemo } from 'react';
 import { createAuthController, createSupabaseAuthApi } from '../auth/authController';
 import { createOrgAdminApi } from '../shell/orgAdmin';
+import { createOrgTasksApi } from '../shell/orgTasks';
 import { createShellApi } from '../shell/shellModel';
 import { createSupabase, createAccountSupabase, configuredEnvironment } from '../supabase/client';
 import { createSupabaseRpcClient } from '../supabase/rpcClient';
@@ -13,11 +14,11 @@ import { Shell } from './Shell';
 
 /** Device/hosted entry. Needs an explicit EXPO_PUBLIC_TASKFLOW_ENV (see supabase/config.ts). NOT run against any real Supabase yet. */
 export function HostedApp({ locale }: { locale: Locale }) {
-  const { sb, auth, api, adminApi } = useMemo(() => {
+  const { sb, auth, api, adminApi, tasksApi } = useMemo(() => {
     const sb = createSupabase();
     const rpc = createSupabaseRpcClient(sb);
     const read = (fn: string, args: Record<string, unknown>) => sb.schema('app_api').rpc(fn, args) as never;
-    return { sb, adminApi: createOrgAdminApi(read, rpc), auth: createAuthController(createSupabaseAuthApi(sb)), api: createShellApi((fn, args) => sb.schema('app_api').rpc(fn, args) as never, rpc) };
+    return { sb, adminApi: createOrgAdminApi(read, rpc), tasksApi: createOrgTasksApi(read, rpc), auth: createAuthController(createSupabaseAuthApi(sb)), api: createShellApi((fn, args) => sb.schema('app_api').rpc(fn, args) as never, rpc) };
   }, []);
   useEffect(() => { void auth.start(); const sub = AppState.addEventListener('change', s => { if (s === 'active') sb.auth.startAutoRefresh(); else sb.auth.stopAutoRefresh(); }); return () => { sub.remove(); auth.dispose(); }; }, [auth, sb]);
   const makeStore = useMemo(() => {
@@ -28,5 +29,6 @@ export function HostedApp({ locale }: { locale: Locale }) {
       catch (e) { stop(); bound.dispose(); throw e; }
     };
   }, [sb, auth]);
-  return <Shell auth={auth} api={api} adminApi={adminApi} makeStore={makeStore} locale={locale} />;
+  return <Shell auth={auth} api={api} adminApi={adminApi} tasksApi={tasksApi} makeStore={makeStore} locale={locale} />;
 }
+
